@@ -11,6 +11,10 @@
   --button-bg: rgba(13, 30, 57, 0.72);
   --button-border: rgba(157, 210, 255, 0.22);
   --shadow: 0 30px 70px rgba(0, 0, 0, 0.42);
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
 }
 
 * {
@@ -24,6 +28,9 @@ body {
 }
 
 body {
+  min-height: 100vh;
+  min-height: 100svh;
+  min-height: 100dvh;
   overflow: hidden;
   background:
     radial-gradient(circle at 18% 18%, rgba(28, 74, 132, 0.52), transparent 24%),
@@ -49,12 +56,17 @@ body::before {
   position: relative;
   width: 100vw;
   height: 100vh;
+  min-height: 100vh;
+  min-height: 100svh;
+  min-height: 100dvh;
+  height: 100dvh;
 }
 
 #earth-canvas {
   display: block;
   width: 100%;
   height: 100%;
+  touch-action: none;
 }
 
 .reticle {
@@ -98,7 +110,10 @@ body::before {
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  padding: 24px;
+  padding-top: max(24px, calc(var(--safe-top) + 12px));
+  padding-right: max(24px, calc(var(--safe-right) + 16px));
+  padding-bottom: max(24px, calc(var(--safe-bottom) + 18px));
+  padding-left: max(24px, calc(var(--safe-left) + 16px));
   pointer-events: none;
 }
 
@@ -158,6 +173,7 @@ h1 {
 button {
   border: 1px solid var(--button-border);
   border-radius: 999px;
+  min-height: 52px;
   padding: 12px 16px;
   background:
     linear-gradient(180deg, rgba(23, 57, 103, 0.92), rgba(10, 22, 43, 0.86));
@@ -239,7 +255,7 @@ button:disabled {
 .loading {
   position: absolute;
   left: 50%;
-  bottom: 28px;
+  bottom: max(28px, calc(var(--safe-bottom) + 16px));
   transform: translateX(-50%);
   padding: 12px 16px;
   border: 1px solid rgba(168, 213, 255, 0.18);
@@ -340,37 +356,76 @@ button:disabled {
 
 @media (max-width: 760px) {
   .hud {
-    padding: 16px;
-    gap: 16px;
-    justify-content: flex-start;
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    align-items: start;
+    gap: 12px;
+    padding-top: max(14px, calc(var(--safe-top) + 10px));
+    padding-right: max(14px, calc(var(--safe-right) + 12px));
+    padding-bottom: max(14px, calc(var(--safe-bottom) + 14px));
+    padding-left: max(14px, calc(var(--safe-left) + 12px));
   }
 
   .panel,
   .panel-controls,
   .panel-hero {
-    width: 100%;
+    width: min(100%, 440px);
     align-self: stretch;
   }
 
   .panel {
-    padding: 18px;
+    padding: 16px;
     border-radius: 20px;
   }
 
+  .panel-hero {
+    max-width: 100%;
+  }
+
   h1 {
-    font-size: clamp(1.8rem, 12vw, 3rem);
+    font-size: clamp(2rem, 16vw, 3.4rem);
+    line-height: 0.9;
+  }
+
+  .lead {
+    margin-top: 12px;
+    max-width: 18ch;
+    font-size: 0.95rem;
+    line-height: 1.55;
   }
 
   .button-row {
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    margin-top: 16px;
   }
 
   button {
     width: 100%;
+    min-height: 56px;
+  }
+
+  .panel-controls {
+    margin-top: auto;
+    max-height: min(34dvh, 320px);
+    overflow: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    background: rgba(4, 11, 22, 0.78);
+  }
+
+  .metric {
+    gap: 4px;
+  }
+
+  .metric-value {
+    font-size: 0.94rem;
+    line-height: 1.5;
   }
 
   .loading {
-    bottom: 16px;
+    bottom: max(12px, calc(var(--safe-bottom) + 10px));
     width: calc(100vw - 32px);
     text-align: center;
   }
@@ -393,6 +448,32 @@ button:disabled {
   }
 
   .flight-tooltip__grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 480px) {
+  .eyebrow {
+    margin-bottom: 8px;
+    font-size: 0.74rem;
+    letter-spacing: 0.18em;
+  }
+
+  .panel {
+    padding: 15px;
+  }
+
+  .lead {
+    max-width: none;
+  }
+
+  .panel-controls {
+    max-height: min(32dvh, 280px);
+  }
+}
+
+@media (max-width: 360px) {
+  .button-row {
     grid-template-columns: 1fr;
   }
 }
