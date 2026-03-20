@@ -2,13 +2,14 @@
   "name": "3d-earth",
   "private": true,
   "scripts": {
-    "start": "serve -l tcp://localhost:4173 .",
-    "start:public": "serve -l tcp://0.0.0.0:4173 .",
+    "start": "node ./scripts/app-server.cjs --host 127.0.0.1 --port 4173 --next-available",
+    "start:public": "node ./scripts/app-server.cjs --host 0.0.0.0 --port 4173",
     "deploy:ec2": "bash ./scripts/deploy-on-ec2.sh",
     "publish:main": "bash ./scripts/publish-and-deploy.sh"
   },
   "dependencies": {
-    "three": "^0.183.2"
+    "three": "^0.183.2",
+    "ws": "^8.18.3"
   },
   "devDependencies": {
     "serve": "^14.2.5"

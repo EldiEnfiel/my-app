@@ -41,6 +41,12 @@ export const APP_CONFIG = {
     markerMinSize: 0.008,
     markerMaxSize: 0.018,
   },
+  ships: {
+    snapshotUrl: "/api/ships",
+    markerBaseRadius: 1.006,
+    markerMinSize: 0.01,
+    markerMaxSize: 0.016,
+  },
   regionalTexture: {
     activationDistance: 1.22,
     keepMargin: 0.24,

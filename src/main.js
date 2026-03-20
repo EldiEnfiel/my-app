@@ -15,10 +15,12 @@ const loadingLabel = document.querySelector("#loading");
 const timeSyncButton = document.querySelector("#toggle-time-sync");
 const cloudButton = document.querySelector("#toggle-clouds");
 const flightButton = document.querySelector("#toggle-flights");
+const shipButton = document.querySelector("#toggle-ships");
 const resetButton = document.querySelector("#reset-view");
 const syncValue = document.querySelector("#sync-value");
 const clockValue = document.querySelector("#clock-value");
 const flightStatusValue = document.querySelector("#flight-status-value");
+const shipStatusValue = document.querySelector("#ship-status-value");
 const flightTooltip = document.querySelector("#flight-tooltip");
 const latitudeValue = document.querySelector("#latitude-value");
 const longitudeValue = document.querySelector("#longitude-value");
@@ -121,19 +123,27 @@ let atmosphereMaterial;
 let flightLayer;
 let flightPoints;
 let flightPointsMaterial;
+let shipLayer;
+let shipPoints;
+let shipPointsMaterial;
 let activeRegionalTexture = null;
 let activeRegionalBounds = null;
 let currentViewedLatitude = null;
 let currentViewedLongitude = null;
 let flightsVisible = false;
+let shipsVisible = false;
 let isLoadingFlights = false;
+let isLoadingShips = false;
 let activeFlightAbortController = null;
+let activeShipAbortController = null;
 let flightRequestId = 0;
-let hoveredFlightIndex = -1;
+let shipRequestId = 0;
+let hoveredTooltipKey = "";
 let pendingRegionalKey = "";
 let regionalRequestId = 0;
 let lastClockText = "";
 let lastFlightStatusText = "表示オフ";
+let lastShipStatusText = "表示オフ";
 let lastLatitudeText = "";
 let lastLongitudeText = "";
 
@@ -142,6 +152,7 @@ regionalTextureLoader.setCrossOrigin("anonymous");
 syncValue.textContent = "PCの現在時刻と同期中";
 clockValue.textContent = "--";
 flightStatusValue.textContent = "表示オフ";
+shipStatusValue.textContent = "表示オフ";
 latitudeValue.textContent = "--";
 longitudeValue.textContent = "--";
 
@@ -198,6 +209,28 @@ flightButton.addEventListener("click", () => {
   flightsVisible = true;
   updateFlightToggleUI();
   loadFlightSnapshot();
+});
+
+shipButton.addEventListener("click", () => {
+  if (isLoadingShips) {
+    return;
+  }
+
+  if (shipsVisible) {
+    shipsVisible = false;
+    shipRequestId += 1;
+    activeShipAbortController?.abort();
+    activeShipAbortController = null;
+    clearShipMarkers();
+    setShipStatus("表示オフ");
+    hideFlightTooltip();
+    updateShipToggleUI();
+    return;
+  }
+
+  shipsVisible = true;
+  updateShipToggleUI();
+  loadShipSnapshot();
 });
 
 resetButton.addEventListener("click", () => {
@@ -258,6 +291,9 @@ async function init() {
   flightLayer = new THREE.Group();
   surfaceGroup.add(flightLayer);
 
+  shipLayer = new THREE.Group();
+  surfaceGroup.add(shipLayer);
+
   atmosphereMaterial = createAtmosphereMaterial();
   const atmosphereMesh = new THREE.Mesh(
     new THREE.SphereGeometry(
@@ -281,6 +317,7 @@ async function init() {
   updateSolarState(activeDate);
   updateClockLabel(activeDate);
   updateFlightToggleUI();
+  updateShipToggleUI();
   updateControlSensitivity();
   updateViewedLocation();
   exposeDebugBridge();
@@ -297,7 +334,7 @@ function animate() {
     updateClockLabel(activeDate);
     updateControlSensitivity();
     controls.update();
-    updateFlightMarkerScale();
+    updateTrafficMarkerScale();
     updateViewedLocation();
     renderer.render(scene, camera);
   });
@@ -418,6 +455,15 @@ function updateFlightToggleUI() {
       : "航空機を表示";
 }
 
+function updateShipToggleUI() {
+  shipButton.disabled = isLoadingShips || !shipLayer || !earthMesh;
+  shipButton.textContent = isLoadingShips
+    ? "船舶を読込中..."
+    : shipsVisible
+      ? "船舶を非表示"
+      : "船舶を表示";
+}
+
 function setFlightStatus(text) {
   if (text === lastFlightStatusText) {
     return;
@@ -427,8 +473,20 @@ function setFlightStatus(text) {
   flightStatusValue.textContent = text;
 }
 
+function setShipStatus(text) {
+  if (text === lastShipStatusText) {
+    return;
+  }
+
+  lastShipStatusText = text;
+  shipStatusValue.textContent = text;
+}
+
 function handleCanvasPointerMove(event) {
-  if (!flightsVisible || !flightPoints) {
+  if (
+    (!flightsVisible || !flightPoints) &&
+    (!shipsVisible || !shipPoints)
+  ) {
     hideFlightTooltip();
     return;
   }
@@ -436,18 +494,74 @@ function handleCanvasPointerMove(event) {
   pointer.x = (event.clientX / window.innerWidth) * 2 - 1;
   pointer.y = -(event.clientY / window.innerHeight) * 2 + 1;
 
-  updateFlightTooltip(event.clientX, event.clientY);
+  updateTrafficTooltip(event.clientX, event.clientY);
 }
 
-function updateFlightTooltip(clientX, clientY) {
-  if (!flightPoints) {
+function updateTrafficTooltip(clientX, clientY) {
+  const hoveredTraffic =
+    findHoveredFlight() ?? findHoveredShip();
+
+  if (!hoveredTraffic) {
     hideFlightTooltip();
     return;
   }
 
+  if (hoveredTooltipKey !== hoveredTraffic.key) {
+    hoveredTooltipKey = hoveredTraffic.key;
+    flightTooltip.innerHTML = hoveredTraffic.html;
+  }
+
+  positionFlightTooltip(clientX, clientY);
+  canvas.style.cursor = "pointer";
+  flightTooltip.classList.add("is-visible");
+}
+
+function findHoveredFlight() {
+  if (!flightPoints) {
+    return null;
+  }
+
+  const intersection = findHoveredDirectionalMarker(flightPoints, 0.02, 0.04);
+  const record =
+    intersection?.index != null
+      ? flightPoints.userData.records?.[intersection.index]
+      : null;
+
+  if (!record) {
+    return null;
+  }
+
+  return {
+    html: renderFlightTooltip(record),
+    key: `flight:${intersection.index}`,
+  };
+}
+
+function findHoveredShip() {
+  if (!shipPoints) {
+    return null;
+  }
+
+  const intersection = findHoveredDirectionalMarker(shipPoints, 0.018, 0.034);
+  const record =
+    intersection?.index != null
+      ? shipPoints.userData.records?.[intersection.index]
+      : null;
+
+  if (!record) {
+    return null;
+  }
+
+  return {
+    html: renderShipTooltip(record),
+    key: `ship:${intersection.index}`,
+  };
+}
+
+function findHoveredDirectionalMarker(points, minThreshold, maxThreshold) {
   raycaster.params.Points.threshold = THREE.MathUtils.lerp(
-    0.02,
-    0.04,
+    minThreshold,
+    maxThreshold,
     smooth01(
       (camera.position.distanceTo(controls.target) - controls.minDistance) /
         (4.9 - controls.minDistance)
@@ -455,25 +569,8 @@ function updateFlightTooltip(clientX, clientY) {
   );
   raycaster.setFromCamera(pointer, camera);
 
-  const [intersection] = raycaster.intersectObject(flightPoints, false);
-  const hoveredRecord =
-    intersection?.index != null
-      ? flightPoints.userData.records?.[intersection.index]
-      : null;
-
-  if (!hoveredRecord) {
-    hideFlightTooltip();
-    return;
-  }
-
-  if (hoveredFlightIndex !== intersection.index) {
-    hoveredFlightIndex = intersection.index;
-    flightTooltip.innerHTML = renderFlightTooltip(hoveredRecord);
-  }
-
-  positionFlightTooltip(clientX, clientY);
-  canvas.style.cursor = "pointer";
-  flightTooltip.classList.add("is-visible");
+  const [intersection] = raycaster.intersectObject(points, false);
+  return intersection ?? null;
 }
 
 function positionFlightTooltip(clientX, clientY) {
@@ -496,7 +593,7 @@ function positionFlightTooltip(clientX, clientY) {
 }
 
 function hideFlightTooltip() {
-  hoveredFlightIndex = -1;
+  hoveredTooltipKey = "";
   canvas.style.cursor = "";
   flightTooltip.classList.remove("is-visible");
 }
@@ -563,6 +660,72 @@ async function loadFlightSnapshot() {
   }
 }
 
+async function loadShipSnapshot() {
+  if (!shipLayer) {
+    shipsVisible = false;
+    updateShipToggleUI();
+    return;
+  }
+
+  const requestId = ++shipRequestId;
+  isLoadingShips = true;
+  activeShipAbortController = new AbortController();
+  clearShipMarkers();
+  setShipStatus("全世界の船舶 AIS を読込中...");
+  updateShipToggleUI();
+
+  try {
+    const response = await fetch(APP_CONFIG.ships.snapshotUrl, {
+      cache: "no-store",
+      signal: activeShipAbortController.signal,
+    });
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok || data.ok === false) {
+      throw new Error(data.message || `Ship snapshot failed: ${response.status}`);
+    }
+
+    if (requestId !== shipRequestId || !shipsVisible) {
+      return;
+    }
+
+    const shipCount = populateShipMarkers(data.records ?? []);
+    const snapshotDate =
+      typeof data.sampledAt === "string" ? new Date(data.sampledAt) : new Date();
+
+    if (shipCount <= 0) {
+      shipsVisible = false;
+      setShipStatus("受信できた船舶がありませんでした");
+      return;
+    }
+
+    setShipStatus(
+      `AIS の最新受信 ${shipCount.toLocaleString("ja-JP")} 隻を表示中 (${formatFlightSnapshotTime(snapshotDate)})`
+    );
+  } catch (error) {
+    if (error.name === "AbortError" || requestId !== shipRequestId) {
+      return;
+    }
+
+    if (!error.message?.includes("AISSTREAM_API_KEY")) {
+      console.error(error);
+    }
+    shipsVisible = false;
+    clearShipMarkers();
+    setShipStatus(
+      error.message?.includes("AISSTREAM_API_KEY")
+        ? "AISSTREAM_API_KEY がサーバーに未設定です"
+        : "船舶データの取得に失敗"
+    );
+  } finally {
+    if (requestId === shipRequestId) {
+      activeShipAbortController = null;
+      isLoadingShips = false;
+      updateShipToggleUI();
+    }
+  }
+}
+
 function populateFlightMarkers(states) {
   if (!flightLayer) {
     return 0;
@@ -595,7 +758,7 @@ function populateFlightMarkers(states) {
     latLonToSurfaceVector(latitude, longitude, flightMarkerVector).multiplyScalar(
       radius
     );
-    getFlightTrackVector(latitude, longitude, track, flightDirectionVector);
+    getSurfaceTrackVector(latitude, longitude, track, flightDirectionVector);
 
     const positionIndex = index * 3;
     positions[positionIndex] = flightMarkerVector.x;
@@ -617,7 +780,7 @@ function populateFlightMarkers(states) {
   flightPoints = new THREE.Points(geometry, getFlightMarkerMaterial());
   flightPoints.userData.records = records;
   flightLayer.add(flightPoints);
-  updateFlightMarkerScale();
+  updateTrafficMarkerScale();
 
   return airborneStates.length;
 }
@@ -633,76 +796,166 @@ function clearFlightMarkers() {
   flightPoints = null;
 }
 
+function populateShipMarkers(records) {
+  if (!shipLayer) {
+    return 0;
+  }
+
+  const visibleRecords = records.filter(
+    (record) =>
+      Number.isFinite(record?.latitude) && Number.isFinite(record?.longitude)
+  );
+
+  if (visibleRecords.length <= 0) {
+    clearShipMarkers();
+    return 0;
+  }
+
+  const positions = new Float32Array(visibleRecords.length * 3);
+  const directions = new Float32Array(visibleRecords.length * 3);
+
+  visibleRecords.forEach((record, index) => {
+    const heading = Number.isFinite(record.heading)
+      ? record.heading
+      : Number.isFinite(record.course)
+        ? record.course
+        : 0;
+
+    latLonToSurfaceVector(
+      record.latitude,
+      record.longitude,
+      flightMarkerVector
+    ).multiplyScalar(APP_CONFIG.ships.markerBaseRadius);
+    getSurfaceTrackVector(
+      record.latitude,
+      record.longitude,
+      heading,
+      flightDirectionVector
+    );
+
+    const positionIndex = index * 3;
+    positions[positionIndex] = flightMarkerVector.x;
+    positions[positionIndex + 1] = flightMarkerVector.y;
+    positions[positionIndex + 2] = flightMarkerVector.z;
+    directions[positionIndex] = flightDirectionVector.x;
+    directions[positionIndex + 1] = flightDirectionVector.y;
+    directions[positionIndex + 2] = flightDirectionVector.z;
+  });
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute("direction", new THREE.BufferAttribute(directions, 3));
+  geometry.computeBoundingSphere();
+
+  clearShipMarkers();
+
+  shipPoints = new THREE.Points(geometry, getShipMarkerMaterial());
+  shipPoints.userData.records = visibleRecords;
+  shipLayer.add(shipPoints);
+  updateTrafficMarkerScale();
+
+  return visibleRecords.length;
+}
+
+function clearShipMarkers() {
+  if (!shipPoints || !shipLayer) {
+    return;
+  }
+
+  shipLayer.remove(shipPoints);
+  hideFlightTooltip();
+  shipPoints.geometry.dispose();
+  shipPoints = null;
+}
+
 function getFlightMarkerMaterial() {
   if (!flightPointsMaterial) {
-    flightPointsMaterial = new THREE.ShaderMaterial({
-      uniforms: {
-        markerMap: { value: createFlightMarkerTexture() },
-        markerSize: { value: APP_CONFIG.flights.markerMaxSize },
-        pointScale: { value: renderer.getPixelRatio() * window.innerHeight * 0.5 },
-      },
-      vertexShader: `
-        attribute vec3 direction;
-
-        uniform float markerSize;
-        uniform float pointScale;
-
-        varying float vRotation;
-
-        void main() {
-          vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-          vec4 clipPosition = projectionMatrix * mvPosition;
-          vec4 clipDirection = projectionMatrix * modelViewMatrix * vec4(position + direction * 0.065, 1.0);
-          vec2 screenDirection =
-            (clipDirection.xy / max(clipDirection.w, 0.0001)) -
-            (clipPosition.xy / max(clipPosition.w, 0.0001));
-          float directionLength = length(screenDirection);
-
-          vRotation = directionLength > 0.00001
-            ? atan(screenDirection.y, screenDirection.x) - 1.57079632679
-            : 0.0;
-
-          gl_PointSize = markerSize * pointScale / max(-mvPosition.z, 0.0001);
-          gl_Position = clipPosition;
-        }
-      `,
-      fragmentShader: `
-        uniform sampler2D markerMap;
-
-        varying float vRotation;
-
-        void main() {
-          vec2 centered = gl_PointCoord - 0.5;
-          float sine = sin(-vRotation);
-          float cosine = cos(-vRotation);
-          vec2 rotatedUv =
-            mat2(cosine, -sine, sine, cosine) * centered + 0.5;
-
-          if (
-            rotatedUv.x < 0.0 || rotatedUv.x > 1.0 ||
-            rotatedUv.y < 0.0 || rotatedUv.y > 1.0
-          ) {
-            discard;
-          }
-
-          vec4 marker = texture2D(markerMap, rotatedUv);
-
-          if (marker.a < 0.12) {
-            discard;
-          }
-
-          gl_FragColor = marker;
-          #include <tonemapping_fragment>
-          #include <colorspace_fragment>
-        }
-      `,
-      transparent: true,
-      depthWrite: false,
-      depthTest: true,
-    });
+    flightPointsMaterial = createDirectionalMarkerMaterial(
+      createFlightMarkerTexture(),
+      APP_CONFIG.flights.markerMaxSize
+    );
   }
 
   return flightPointsMaterial;
+}
+
+function getShipMarkerMaterial() {
+  if (!shipPointsMaterial) {
+    shipPointsMaterial = createDirectionalMarkerMaterial(
+      createShipMarkerTexture(),
+      APP_CONFIG.ships.markerMaxSize
+    );
+  }
+
+  return shipPointsMaterial;
+}
+
+function createDirectionalMarkerMaterial(markerMap, markerSize) {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      markerMap: { value: markerMap },
+      markerSize: { value: markerSize },
+      pointScale: { value: renderer.getPixelRatio() * window.innerHeight * 0.5 },
+    },
+    vertexShader: `
+      attribute vec3 direction;
+
+      uniform float markerSize;
+      uniform float pointScale;
+
+      varying float vRotation;
+
+      void main() {
+        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+        vec4 clipPosition = projectionMatrix * mvPosition;
+        vec4 clipDirection = projectionMatrix * modelViewMatrix * vec4(position + direction * 0.065, 1.0);
+        vec2 screenDirection =
+          (clipDirection.xy / max(clipDirection.w, 0.0001)) -
+          (clipPosition.xy / max(clipPosition.w, 0.0001));
+        float directionLength = length(screenDirection);
+
+        vRotation = directionLength > 0.00001
+          ? atan(screenDirection.y, screenDirection.x) - 1.57079632679
+          : 0.0;
+
+        gl_PointSize = markerSize * pointScale / max(-mvPosition.z, 0.0001);
+        gl_Position = clipPosition;
+      }
+    `,
+    fragmentShader: `
+      uniform sampler2D markerMap;
+
+      varying float vRotation;
+
+      void main() {
+        vec2 centered = gl_PointCoord - 0.5;
+        float sine = sin(-vRotation);
+        float cosine = cos(-vRotation);
+        vec2 rotatedUv =
+          mat2(cosine, -sine, sine, cosine) * centered + 0.5;
+
+        if (
+          rotatedUv.x < 0.0 || rotatedUv.x > 1.0 ||
+          rotatedUv.y < 0.0 || rotatedUv.y > 1.0
+        ) {
+          discard;
+        }
+
+        vec4 marker = texture2D(markerMap, rotatedUv);
+
+        if (marker.a < 0.12) {
+          discard;
+        }
+
+        gl_FragColor = marker;
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    depthTest: true,
+  });
 }
 
 function createFlightMarkerTexture() {
@@ -740,6 +993,51 @@ function createFlightMarkerTexture() {
   context.closePath();
   context.fill();
   context.stroke();
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+
+  return texture;
+}
+
+function createShipMarkerTexture() {
+  const size = 128;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+
+  const context = canvas.getContext("2d");
+  context.clearRect(0, 0, size, size);
+  context.translate(size / 2, size / 2);
+  context.shadowColor = "rgba(124, 227, 255, 0.4)";
+  context.shadowBlur = 16;
+  context.fillStyle = "rgba(227, 249, 255, 0.98)";
+  context.strokeStyle = "rgba(67, 196, 255, 0.92)";
+  context.lineWidth = 4;
+
+  context.beginPath();
+  context.moveTo(0, -52);
+  context.lineTo(16, -14);
+  context.lineTo(14, 26);
+  context.lineTo(26, 42);
+  context.lineTo(26, 52);
+  context.lineTo(0, 60);
+  context.lineTo(-26, 52);
+  context.lineTo(-26, 42);
+  context.lineTo(-14, 26);
+  context.lineTo(-16, -14);
+  context.closePath();
+  context.fill();
+  context.stroke();
+
+  context.beginPath();
+  context.moveTo(-6, -4);
+  context.lineTo(6, -4);
+  context.lineTo(10, 18);
+  context.lineTo(-10, 18);
+  context.closePath();
+  context.fillStyle = "rgba(18, 67, 110, 0.78)";
+  context.fill();
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
@@ -789,6 +1087,29 @@ function renderFlightTooltip(record) {
   `;
 }
 
+function renderShipTooltip(record) {
+  const title = record.name || record.callsign || record.id || "UNKNOWN";
+  const subtitle = record.callsign
+    ? `${record.callsign} / MMSI ${record.id}`
+    : `MMSI ${record.id}`;
+
+  return `
+    <p class="flight-tooltip__eyebrow">Live Vessel Snapshot</p>
+    <p class="flight-tooltip__title">${escapeHtml(title)}</p>
+    <p class="flight-tooltip__meta">${escapeHtml(subtitle)}</p>
+    <div class="flight-tooltip__grid">
+      ${renderFlightTooltipCell("緯度", formatFlightCoordinate(record.latitude, true))}
+      ${renderFlightTooltipCell("経度", formatFlightCoordinate(record.longitude, false))}
+      ${renderFlightTooltipCell("速力", formatShipSpeed(record.speedKnots))}
+      ${renderFlightTooltipCell("進行方向", formatFlightHeading(record.heading))}
+      ${renderFlightTooltipCell("船種", record.shipType || "--")}
+      ${renderFlightTooltipCell("目的地", record.destination || "--")}
+      ${renderFlightTooltipCell("最終受信", formatFlightContact(parseShipContact(record.lastUpdate)))}
+      ${renderFlightTooltipCell("進路", formatFlightHeading(record.course))}
+    </div>
+  `;
+}
+
 function renderFlightTooltipCell(label, value) {
   return `
     <div class="flight-tooltip__cell">
@@ -798,7 +1119,7 @@ function renderFlightTooltipCell(label, value) {
   `;
 }
 
-function getFlightTrackVector(latitude, longitude, track, target) {
+function getSurfaceTrackVector(latitude, longitude, track, target) {
   const latitudeRad = THREE.MathUtils.degToRad(latitude);
   const longitudeRad = THREE.MathUtils.degToRad(longitude);
   const trackRad = THREE.MathUtils.degToRad(track);
@@ -817,22 +1138,37 @@ function getFlightTrackVector(latitude, longitude, track, target) {
     .normalize();
 }
 
-function updateFlightMarkerScale() {
-  if (!flightPointsMaterial) {
-    return;
-  }
-
+function updateTrafficMarkerScale() {
   const distance = camera.position.distanceTo(controls.target);
   const distanceFactor = smooth01(
     (distance - controls.minDistance) / (4.9 - controls.minDistance)
   );
 
-  flightPointsMaterial.uniforms.markerSize.value = THREE.MathUtils.lerp(
+  updateDirectionalMarkerScale(
+    flightPointsMaterial,
     APP_CONFIG.flights.markerMinSize,
     APP_CONFIG.flights.markerMaxSize,
     distanceFactor
   );
-  flightPointsMaterial.uniforms.pointScale.value =
+  updateDirectionalMarkerScale(
+    shipPointsMaterial,
+    APP_CONFIG.ships.markerMinSize,
+    APP_CONFIG.ships.markerMaxSize,
+    distanceFactor
+  );
+}
+
+function updateDirectionalMarkerScale(material, minSize, maxSize, distanceFactor) {
+  if (!material) {
+    return;
+  }
+
+  material.uniforms.markerSize.value = THREE.MathUtils.lerp(
+    minSize,
+    maxSize,
+    distanceFactor
+  );
+  material.uniforms.pointScale.value =
     renderer.getPixelRatio() * window.innerHeight * 0.5;
 }
 
@@ -1394,6 +1730,16 @@ function formatFlightSpeed(value) {
   })} km/h`;
 }
 
+function formatShipSpeed(value) {
+  if (!Number.isFinite(value)) {
+    return "--";
+  }
+
+  return `${value.toLocaleString("ja-JP", {
+    maximumFractionDigits: 1,
+  })} kn`;
+}
+
 function formatFlightHeading(value) {
   if (!Number.isFinite(value)) {
     return "--";
@@ -1408,6 +1754,21 @@ function formatFlightContact(value) {
   }
 
   return `${flightSnapshotFormatter.format(value)} ${formatUtcOffset(value)}`;
+}
+
+function parseShipContact(value) {
+  if (value instanceof Date) {
+    return value;
+  }
+
+  if (typeof value === "string" || typeof value === "number") {
+    const date = new Date(value);
+    if (!Number.isNaN(date.getTime())) {
+      return date;
+    }
+  }
+
+  return null;
 }
 
 function escapeHtml(value) {

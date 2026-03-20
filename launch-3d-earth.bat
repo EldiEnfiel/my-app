@@ -20,6 +20,16 @@ if not exist "node_modules\three\build\three.module.js" (
   )
 )
 
+if not exist "node_modules\ws\index.js" (
+  echo Installing required packages...
+  call npm install
+  if errorlevel 1 (
+    echo npm install failed.
+    pause
+    exit /b 1
+  )
+)
+
 echo Starting 3D Earth Explorer...
 node "%~dp0scripts\launch-local-server.cjs"
 

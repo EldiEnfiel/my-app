@@ -19,6 +19,8 @@ npm start
 npm run start:public
 ```
 
+船舶 AIS 表示も使う場合は、サーバー側に `.env.local` または `.env.production` を置いて `AISSTREAM_API_KEY` を設定してください。サンプルは [/.env.example](/mnt/c/Users/nazok/OneDrive/ドキュメント/OpenAiCodex/3DEarth/.env.example) にあります。
+
 ローカルから `git add / commit / push` まで含めて一発で流す場合は次を使います。
 
 ```bash
@@ -60,7 +62,23 @@ GitHub への push と EC2 デプロイまでまとめて流す場合は `publis
 - ドラッグ: 地球を回転
 - ホイール: ズーム
 - ボタン: 時刻同期の停止・再開 / 雲表示切替 / 視点リセット
-- 右下パネル: PC時刻と画面中央地点の緯度・経度を表示
+- 右下パネル: PC時刻、航空機/船舶表示状態、画面中央地点の緯度・経度を表示
+
+## 船舶表示
+
+船舶表示は `/api/ships` を経由して AISStream のストリームを短時間だけ購読し、その時点で受信できた船舶を一度だけ表示します。ブラウザへ API キーは出さず、サーバー側の環境変数から読みます。
+
+1. AISStream で API キーを取得します
+2. ローカル開発なら `.env.local`、EC2 なら `.env.production` を作ります
+3. `AISSTREAM_API_KEY=...` を設定してサーバーを起動します
+
+サーバー側の例:
+
+```bash
+cp .env.example .env.production
+```
+
+そのあと `AISSTREAM_API_KEY` の値を実キーへ置き換えてください。
 
 ## 自動デプロイ
 
@@ -96,6 +114,7 @@ Repository Secrets:
 
 - リポジトリが `DEPLOY_PATH` に clone 済み
 - `npm ci` と `npm run start:public` が通る
+- 船舶表示を使う場合は `DEPLOY_PATH/.env.production` に `AISSTREAM_API_KEY` が設定済み
 - GitHub から `git pull origin main` できる
 
 サーバー側の GitHub 認証は、個人アカウントの鍵ではなく、リポジトリ単位の deploy key を使う構成を推奨します。
