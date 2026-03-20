@@ -1,0 +1,13 @@
+{
+  "name": "3d-earth",
+  "private": true,
+  "scripts": {
+    "start": "serve -l tcp://localhost:4173 ."
+  },
+  "dependencies": {
+    "three": "^0.183.2"
+  },
+  "devDependencies": {
+    "serve": "^14.2.5"
+  }
+}

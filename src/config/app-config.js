@@ -1,0 +1,49 @@
+export const APP_CONFIG = {
+  renderer: {
+    clearColor: 0x000000,
+    maxPixelRatio: 2,
+    toneMappingExposure: 0.94,
+  },
+  camera: {
+    fov: 35,
+    near: 0.01,
+    far: 160,
+    initialPosition: [0.35, 0.24, 4.9],
+  },
+  controls: {
+    minDistance: 1.14,
+    maxDistance: 8.5,
+    rotateSpeed: 0.72,
+    zoomSpeed: 1.1,
+    minPolarAngle: 0.45,
+    maxPolarAngle: Math.PI - 0.45,
+  },
+  earth: {
+    tiltDegrees: -23.5,
+    surfaceRotationDegrees: 210,
+    radius: 1,
+    cloudRadius: 1.016,
+    atmosphereRadius: 1.05,
+    geometrySegments: 128,
+  },
+  detail: {
+    fadeDistance: 2.35,
+  },
+  flights: {
+    openSkyStatesUrl: "https://opensky-network.org/api/states/all",
+    markerBaseRadius: 1.045,
+    markerAltitudeScale: 0.03,
+    markerMinSize: 0.008,
+    markerMaxSize: 0.018,
+  },
+  regionalTexture: {
+    activationDistance: 1.22,
+    keepMargin: 0.24,
+    requestSize: 2048,
+    minRadius: 2.6,
+    maxRadius: 8.4,
+    maxLongitudeRadius: 18,
+    snapRatio: 0.58,
+    layer: "BlueMarble_NextGeneration",
+  },
+};
