@@ -210,6 +210,17 @@ button:disabled {
   gap: 6px;
 }
 
+.metric-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.metric-search {
+  gap: 10px;
+}
+
 .metric-label {
   color: var(--accent);
   font-size: 0.82rem;
@@ -222,6 +233,80 @@ button:disabled {
   color: var(--text-main);
   font-size: 0.98rem;
   line-height: 1.6;
+}
+
+.mini-button {
+  min-height: 36px;
+  padding: 7px 12px;
+  font-size: 0.78rem;
+  letter-spacing: 0.05em;
+}
+
+.search-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.search-form input {
+  min-width: 0;
+  min-height: 46px;
+  padding: 11px 14px;
+  border: 1px solid rgba(157, 210, 255, 0.18);
+  border-radius: 16px;
+  background: rgba(8, 18, 35, 0.72);
+  color: var(--text-main);
+  font: inherit;
+}
+
+.search-form input::placeholder {
+  color: rgba(224, 235, 255, 0.48);
+}
+
+.search-form input:focus-visible {
+  outline: 2px solid rgba(126, 200, 255, 0.42);
+  outline-offset: 2px;
+}
+
+.search-form button {
+  min-height: 46px;
+  padding-inline: 16px;
+}
+
+.search-results {
+  display: grid;
+  gap: 8px;
+  max-height: 176px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.search-result {
+  display: grid;
+  justify-items: start;
+  gap: 3px;
+  min-height: 0;
+  padding: 11px 13px;
+  border-radius: 16px;
+  text-align: left;
+}
+
+.search-result__title {
+  font-size: 0.92rem;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.search-result__meta {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.search-attribution {
+  color: rgba(224, 235, 255, 0.46);
+  font-size: 0.72rem;
+  line-height: 1.4;
 }
 
 .coords-grid {
@@ -301,6 +386,17 @@ button:disabled {
   visibility: visible;
 }
 
+.flight-tooltip.is-anchored {
+  top: max(12px, calc(var(--safe-top) + 10px));
+  right: max(12px, calc(var(--safe-right) + 10px));
+  left: auto;
+}
+
+.flight-tooltip.is-compact {
+  width: min(240px, calc(100vw - 28px));
+  padding: 12px 13px;
+}
+
 .flight-tooltip__eyebrow {
   margin: 0 0 6px;
   color: var(--accent);
@@ -329,6 +425,23 @@ button:disabled {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px 12px;
+}
+
+.flight-tooltip__inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.flight-tooltip__inline span {
+  padding: 6px 10px;
+  border: 1px solid rgba(168, 213, 255, 0.12);
+  border-radius: 999px;
+  background: rgba(9, 18, 34, 0.52);
+  color: var(--text-main);
+  font-size: 0.8rem;
+  line-height: 1.2;
 }
 
 .flight-tooltip__cell {
@@ -424,6 +537,24 @@ button:disabled {
     line-height: 1.5;
   }
 
+  .mini-button {
+    min-height: 34px;
+    padding: 6px 11px;
+  }
+
+  .search-form {
+    grid-template-columns: 1fr;
+  }
+
+  .search-form input,
+  .search-form button {
+    min-height: 42px;
+  }
+
+  .search-results {
+    max-height: 148px;
+  }
+
   .loading {
     bottom: max(12px, calc(var(--safe-bottom) + 10px));
     width: calc(100vw - 32px);
@@ -449,6 +580,12 @@ button:disabled {
 
   .flight-tooltip__grid {
     grid-template-columns: 1fr;
+  }
+
+  .flight-tooltip.is-anchored {
+    top: auto;
+    right: max(10px, calc(var(--safe-right) + 8px));
+    bottom: max(10px, calc(var(--safe-bottom) + 8px));
   }
 }
 
@@ -536,6 +673,26 @@ button:disabled {
     line-height: 1.34;
   }
 
+  .search-form input,
+  .search-form button {
+    min-height: 40px;
+    border-radius: 14px;
+  }
+
+  .search-result {
+    padding: 9px 11px;
+    border-radius: 14px;
+  }
+
+  .search-result__title {
+    font-size: 0.84rem;
+  }
+
+  .search-result__meta,
+  .search-attribution {
+    font-size: 0.74rem;
+  }
+
   .coord-card {
     padding: 8px 9px;
     border-radius: 12px;
@@ -585,6 +742,10 @@ button:disabled {
 
   .metric-value {
     font-size: 0.8rem;
+  }
+
+  .search-results {
+    max-height: 118px;
   }
 }
 

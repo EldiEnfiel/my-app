@@ -40,6 +40,31 @@
         </section>
 
         <section class="panel panel-controls">
+          <div class="metric metric-search">
+            <div class="metric-header">
+              <span class="metric-label">場所検索</span>
+              <button id="toggle-traffic-info-mode" type="button" class="mini-button">
+                情報表示: 詳細
+              </button>
+            </div>
+            <form id="location-search-form" class="search-form">
+              <input
+                id="location-search-input"
+                type="search"
+                placeholder="地域名・建物名・座標を検索"
+                autocomplete="off"
+                enterkeyhint="search"
+              />
+              <button id="location-search-submit" type="submit">移動</button>
+            </form>
+            <span id="search-status-value" class="metric-value">
+              日本語でも検索できます。Enter で座標へ移動します。
+            </span>
+            <div id="search-results" class="search-results" hidden></div>
+            <span class="search-attribution">
+              Search data © OpenStreetMap contributors
+            </span>
+          </div>
           <div class="metric">
             <span class="metric-label">操作</span>
             <span class="metric-value">ドラッグで回転 / ホイールでズーム / 最大ズーム付近は中心周辺だけ高精細表示</span>

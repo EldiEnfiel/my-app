@@ -16,12 +16,18 @@ const timeSyncButton = document.querySelector("#toggle-time-sync");
 const cloudButton = document.querySelector("#toggle-clouds");
 const flightButton = document.querySelector("#toggle-flights");
 const shipButton = document.querySelector("#toggle-ships");
+const trafficInfoModeButton = document.querySelector("#toggle-traffic-info-mode");
 const resetButton = document.querySelector("#reset-view");
 const syncValue = document.querySelector("#sync-value");
 const clockValue = document.querySelector("#clock-value");
 const flightStatusValue = document.querySelector("#flight-status-value");
 const shipStatusValue = document.querySelector("#ship-status-value");
 const flightTooltip = document.querySelector("#flight-tooltip");
+const locationSearchForm = document.querySelector("#location-search-form");
+const locationSearchInput = document.querySelector("#location-search-input");
+const locationSearchSubmit = document.querySelector("#location-search-submit");
+const searchStatusValue = document.querySelector("#search-status-value");
+const searchResults = document.querySelector("#search-results");
 const latitudeValue = document.querySelector("#latitude-value");
 const longitudeValue = document.querySelector("#longitude-value");
 
@@ -83,12 +89,21 @@ const regionalTextureLoader = new THREE.TextureLoader();
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2(2, 2);
 const screenCenter = new THREE.Vector2(0, 0);
+const pointerDownPoint = new THREE.Vector2();
 const sunDirection = new THREE.Vector3(1, 0, 0);
 const flightMarkerVector = new THREE.Vector3();
 const flightDirectionVector = new THREE.Vector3();
 const flightNorthVector = new THREE.Vector3();
 const flightEastVector = new THREE.Vector3();
+const cameraMoveVector = new THREE.Vector3();
+const cameraMoveQuaternion = new THREE.Quaternion();
+const identityQuaternion = new THREE.Quaternion();
+const viewedLocalPoint = new THREE.Vector3();
+const viewedWorldPoint = new THREE.Vector3();
 const debugEnabled = new URLSearchParams(window.location.search).has("debug");
+const compactTrafficMediaQuery = window.matchMedia(
+  `(max-width: ${APP_CONFIG.trafficInfo.compactBreakpoint}px)`
+);
 const clockFormatter = new Intl.DateTimeFormat("ja-JP", {
   year: "numeric",
   month: "2-digit",
@@ -146,6 +161,21 @@ let lastFlightStatusText = "表示オフ";
 let lastShipStatusText = "表示オフ";
 let lastLatitudeText = "";
 let lastLongitudeText = "";
+let lastSearchStatusText = "";
+let trafficInfoMode = compactTrafficMediaQuery.matches
+  ? APP_CONFIG.trafficInfo.mobileDefaultMode
+  : APP_CONFIG.trafficInfo.defaultMode;
+let hoveredTrafficInfo = null;
+let selectedTrafficInfo = null;
+let activePointerType = "mouse";
+let isCanvasPointerDown = false;
+let isCanvasDragging = false;
+let lastPointerClientX = 0;
+let lastPointerClientY = 0;
+let activeSearchAbortController = null;
+let searchRequestId = 0;
+let currentSearchResults = [];
+let cameraMoveAnimation = null;
 
 regionalTextureLoader.setCrossOrigin("anonymous");
 
@@ -153,6 +183,7 @@ syncValue.textContent = "PCの現在時刻と同期中";
 clockValue.textContent = "--";
 flightStatusValue.textContent = "表示オフ";
 shipStatusValue.textContent = "表示オフ";
+searchStatusValue.textContent = "日本語でも検索できます。Enter で座標へ移動します。";
 latitudeValue.textContent = "--";
 longitudeValue.textContent = "--";
 
@@ -201,7 +232,7 @@ flightButton.addEventListener("click", () => {
     activeFlightAbortController = null;
     clearFlightMarkers();
     setFlightStatus("表示オフ");
-    hideFlightTooltip();
+    clearTrafficInfoState("flight");
     updateFlightToggleUI();
     return;
   }
@@ -223,7 +254,7 @@ shipButton.addEventListener("click", () => {
     activeShipAbortController = null;
     clearShipMarkers();
     setShipStatus("表示オフ");
-    hideFlightTooltip();
+    clearTrafficInfoState("ship");
     updateShipToggleUI();
     return;
   }
@@ -233,12 +264,25 @@ shipButton.addEventListener("click", () => {
   loadShipSnapshot();
 });
 
+trafficInfoModeButton.addEventListener("click", () => {
+  trafficInfoMode = trafficInfoMode === "detail" ? "simple" : "detail";
+  updateTrafficInfoModeUI();
+  refreshTrafficTooltip();
+});
+
 resetButton.addEventListener("click", () => {
+  cancelCameraMoveAnimation();
   controls.reset();
 });
 
+locationSearchForm.addEventListener("submit", handleLocationSearchSubmit);
+searchResults.addEventListener("click", handleSearchResultClick);
+
+canvas.addEventListener("pointerdown", handleCanvasPointerDown);
 canvas.addEventListener("pointermove", handleCanvasPointerMove);
-canvas.addEventListener("pointerleave", hideFlightTooltip);
+canvas.addEventListener("pointerup", handleCanvasPointerUp);
+canvas.addEventListener("pointercancel", handleCanvasPointerCancel);
+canvas.addEventListener("pointerleave", handleCanvasPointerLeave);
 
 window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
@@ -247,7 +291,7 @@ window.addEventListener("resize", () => {
   renderer.setPixelRatio(
     Math.min(window.devicePixelRatio, APP_CONFIG.renderer.maxPixelRatio)
   );
-  hideFlightTooltip();
+  refreshTrafficTooltip();
 });
 
 init().catch((error) => {
@@ -318,6 +362,8 @@ async function init() {
   updateClockLabel(activeDate);
   updateFlightToggleUI();
   updateShipToggleUI();
+  updateTrafficInfoModeUI();
+  setSearchStatus(searchStatusValue.textContent);
   updateControlSensitivity();
   updateViewedLocation();
   exposeDebugBridge();
@@ -334,6 +380,7 @@ function animate() {
     updateClockLabel(activeDate);
     updateControlSensitivity();
     controls.update();
+    updateCameraMoveAnimation();
     updateTrafficMarkerScale();
     updateViewedLocation();
     renderer.render(scene, camera);
@@ -362,6 +409,12 @@ function updateControlSensitivity() {
     APP_CONFIG.controls.dampingFactor,
     rampRatio
   );
+}
+
+function clearControlMotion() {
+  controls._sphericalDelta?.set(0, 0, 0);
+  controls._panOffset?.set(0, 0, 0);
+  controls._scale = 1;
 }
 
 function updateSolarState(date) {
@@ -405,10 +458,7 @@ function updateViewedLocation() {
     return;
   }
 
-  raycaster.setFromCamera(screenCenter, camera);
-  const [intersection] = raycaster.intersectObject(earthMesh, false);
-
-  if (!intersection?.uv) {
+  if (camera.position.lengthSq() <= 0) {
     currentViewedLatitude = null;
     currentViewedLongitude = null;
     setCoordinateLabels("--", "--");
@@ -416,13 +466,26 @@ function updateViewedLocation() {
     return;
   }
 
-  const latitude = intersection.uv.y * 180 - 90;
-  const longitude = normalizeLongitude(intersection.uv.x * 360 - 180);
+  surfaceGroup.updateWorldMatrix(true, false);
+  viewedWorldPoint
+    .copy(camera.position)
+    .sub(controls.target)
+    .normalize();
+  viewedLocalPoint.copy(viewedWorldPoint);
+  surfaceGroup.worldToLocal(viewedLocalPoint);
+  viewedLocalPoint.normalize();
+
+  const latitude = THREE.MathUtils.radToDeg(Math.asin(viewedLocalPoint.y));
+  const longitude = normalizeLongitude(
+    THREE.MathUtils.radToDeg(
+      Math.atan2(-viewedLocalPoint.z, viewedLocalPoint.x)
+    )
+  );
   currentViewedLatitude = latitude;
   currentViewedLongitude = longitude;
 
   setCoordinateLabels(formatLatitude(latitude), formatLongitude(longitude));
-  updateDetailFocus(intersection, latitude, longitude);
+  updateDetailFocus({ point: viewedWorldPoint }, latitude, longitude);
 }
 
 function setCoordinateLabels(latitudeText, longitudeText) {
@@ -464,6 +527,12 @@ function updateShipToggleUI() {
       : "船舶を表示";
 }
 
+function updateTrafficInfoModeUI() {
+  trafficInfoModeButton.textContent = `情報表示: ${
+    trafficInfoMode === "detail" ? "詳細" : "簡易"
+  }`;
+}
+
 function setFlightStatus(text) {
   if (text === lastFlightStatusText) {
     return;
@@ -482,38 +551,197 @@ function setShipStatus(text) {
   shipStatusValue.textContent = text;
 }
 
+function setSearchStatus(text) {
+  if (text === lastSearchStatusText) {
+    return;
+  }
+
+  lastSearchStatusText = text;
+  searchStatusValue.textContent = text;
+}
+
+function handleCanvasPointerDown(event) {
+  activePointerType = event.pointerType || "mouse";
+  isCanvasPointerDown = true;
+  isCanvasDragging = false;
+  pointerDownPoint.set(event.clientX, event.clientY);
+  lastPointerClientX = event.clientX;
+  lastPointerClientY = event.clientY;
+  updatePointer(event.clientX, event.clientY);
+  cancelCameraMoveAnimation();
+}
+
 function handleCanvasPointerMove(event) {
+  activePointerType = event.pointerType || activePointerType;
+  lastPointerClientX = event.clientX;
+  lastPointerClientY = event.clientY;
+
   if (
     (!flightsVisible || !flightPoints) &&
     (!shipsVisible || !shipPoints)
   ) {
+    clearHoveredTrafficInfo();
+    return;
+  }
+
+  updatePointer(event.clientX, event.clientY);
+
+  if (
+    isCanvasPointerDown &&
+    !isCanvasDragging &&
+    Math.hypot(
+      event.clientX - pointerDownPoint.x,
+      event.clientY - pointerDownPoint.y
+    ) >= APP_CONFIG.trafficInfo.dragThreshold
+  ) {
+    isCanvasDragging = true;
+  }
+
+  const trafficInfo = findTrafficAtPointer();
+
+  if (activePointerType === "mouse") {
+    hoveredTrafficInfo = trafficInfo;
+    refreshTrafficTooltip(event.clientX, event.clientY);
+    return;
+  }
+
+  if (isCanvasDragging) {
+    hoveredTrafficInfo = trafficInfo;
+    refreshTrafficTooltip(event.clientX, event.clientY);
+    return;
+  }
+
+  if (!selectedTrafficInfo) {
+    hoveredTrafficInfo = null;
     hideFlightTooltip();
     return;
   }
 
-  pointer.x = (event.clientX / window.innerWidth) * 2 - 1;
-  pointer.y = -(event.clientY / window.innerHeight) * 2 + 1;
-
-  updateTrafficTooltip(event.clientX, event.clientY);
+  refreshTrafficTooltip(event.clientX, event.clientY);
 }
 
-function updateTrafficTooltip(clientX, clientY) {
-  const hoveredTraffic =
-    findHoveredFlight() ?? findHoveredShip();
+function handleCanvasPointerUp(event) {
+  activePointerType = event.pointerType || activePointerType;
+  lastPointerClientX = event.clientX;
+  lastPointerClientY = event.clientY;
+  updatePointer(event.clientX, event.clientY);
 
-  if (!hoveredTraffic) {
+  const trafficInfo = findTrafficAtPointer();
+  const endedDragging = isCanvasDragging;
+  isCanvasPointerDown = false;
+  isCanvasDragging = false;
+
+  if (activePointerType === "mouse") {
+    hoveredTrafficInfo = trafficInfo;
+    refreshTrafficTooltip(event.clientX, event.clientY);
+    return;
+  }
+
+  if (!endedDragging) {
+    selectedTrafficInfo = trafficInfo;
+    hoveredTrafficInfo = trafficInfo;
+  } else {
+    hoveredTrafficInfo = null;
+  }
+
+  if (!selectedTrafficInfo && !hoveredTrafficInfo) {
     hideFlightTooltip();
     return;
   }
 
-  if (hoveredTooltipKey !== hoveredTraffic.key) {
-    hoveredTooltipKey = hoveredTraffic.key;
-    flightTooltip.innerHTML = hoveredTraffic.html;
+  refreshTrafficTooltip(event.clientX, event.clientY);
+}
+
+function handleCanvasPointerCancel() {
+  isCanvasPointerDown = false;
+  isCanvasDragging = false;
+  hoveredTrafficInfo = null;
+  refreshTrafficTooltip();
+}
+
+function handleCanvasPointerLeave() {
+  if (activePointerType !== "mouse") {
+    hoveredTrafficInfo = null;
+    refreshTrafficTooltip();
+    return;
   }
 
-  positionFlightTooltip(clientX, clientY);
-  canvas.style.cursor = "pointer";
+  clearHoveredTrafficInfo();
+}
+
+function updatePointer(clientX, clientY) {
+  pointer.x = (clientX / window.innerWidth) * 2 - 1;
+  pointer.y = -(clientY / window.innerHeight) * 2 + 1;
+}
+
+function refreshTrafficTooltip(clientX = lastPointerClientX, clientY = lastPointerClientY) {
+  const trafficInfo = hoveredTrafficInfo ?? selectedTrafficInfo;
+
+  if (!trafficInfo) {
+    hideFlightTooltip();
+    return;
+  }
+
+  const compactMode = shouldRenderCompactTrafficInfo();
+  const anchored = shouldAnchorTrafficTooltip();
+  const html = renderTrafficTooltip(trafficInfo, compactMode);
+  const renderKey = `${trafficInfo.key}:${compactMode ? "compact" : "detail"}:${
+    anchored ? "anchored" : "pointer"
+  }`;
+
+  if (hoveredTooltipKey !== renderKey) {
+    hoveredTooltipKey = renderKey;
+    flightTooltip.innerHTML = html;
+  }
+
+  flightTooltip.classList.toggle("is-compact", compactMode);
+  flightTooltip.classList.toggle("is-anchored", anchored);
+
+  if (anchored) {
+    flightTooltip.style.left = "";
+    flightTooltip.style.top = "";
+  } else {
+    positionFlightTooltip(clientX, clientY);
+  }
+
+  canvas.style.cursor = activePointerType === "mouse" ? "pointer" : "";
   flightTooltip.classList.add("is-visible");
+}
+
+function clearHoveredTrafficInfo() {
+  hoveredTrafficInfo = null;
+  refreshTrafficTooltip();
+}
+
+function clearTrafficInfoState(kind = null) {
+  if (!kind) {
+    hoveredTrafficInfo = null;
+    selectedTrafficInfo = null;
+    hideFlightTooltip();
+    return;
+  }
+
+  if (hoveredTrafficInfo?.kind === kind) {
+    hoveredTrafficInfo = null;
+  }
+
+  if (selectedTrafficInfo?.kind === kind) {
+    selectedTrafficInfo = null;
+  }
+
+  refreshTrafficTooltip();
+}
+
+function shouldRenderCompactTrafficInfo() {
+  return trafficInfoMode === "simple" || isCanvasDragging;
+}
+
+function shouldAnchorTrafficTooltip() {
+  return compactTrafficMediaQuery.matches || activePointerType !== "mouse";
+}
+
+function findTrafficAtPointer() {
+  return findHoveredFlight() ?? findHoveredShip();
 }
 
 function findHoveredFlight() {
@@ -532,7 +760,8 @@ function findHoveredFlight() {
   }
 
   return {
-    html: renderFlightTooltip(record),
+    kind: "flight",
+    record,
     key: `flight:${intersection.index}`,
   };
 }
@@ -553,7 +782,8 @@ function findHoveredShip() {
   }
 
   return {
-    html: renderShipTooltip(record),
+    kind: "ship",
+    record,
     key: `ship:${intersection.index}`,
   };
 }
@@ -595,6 +825,7 @@ function positionFlightTooltip(clientX, clientY) {
 function hideFlightTooltip() {
   hoveredTooltipKey = "";
   canvas.style.cursor = "";
+  flightTooltip.classList.remove("is-anchored", "is-compact");
   flightTooltip.classList.remove("is-visible");
 }
 
@@ -791,7 +1022,7 @@ function clearFlightMarkers() {
   }
 
   flightLayer.remove(flightPoints);
-  hideFlightTooltip();
+  clearTrafficInfoState("flight");
   flightPoints.geometry.dispose();
   flightPoints = null;
 }
@@ -863,7 +1094,7 @@ function clearShipMarkers() {
   }
 
   shipLayer.remove(shipPoints);
-  hideFlightTooltip();
+  clearTrafficInfoState("ship");
   shipPoints.geometry.dispose();
   shipPoints = null;
 }
@@ -1066,6 +1297,18 @@ function buildFlightRecord(state) {
   };
 }
 
+function renderTrafficTooltip(trafficInfo, compactMode) {
+  if (compactMode) {
+    return trafficInfo.kind === "flight"
+      ? renderCompactFlightTooltip(trafficInfo.record)
+      : renderCompactShipTooltip(trafficInfo.record);
+  }
+
+  return trafficInfo.kind === "flight"
+    ? renderFlightTooltip(trafficInfo.record)
+    : renderShipTooltip(trafficInfo.record);
+}
+
 function renderFlightTooltip(record) {
   const title = record.callsign || record.icao24 || "UNKNOWN";
   const subtitle = record.callsign
@@ -1083,6 +1326,42 @@ function renderFlightTooltip(record) {
       ${renderFlightTooltipCell("速度", formatFlightSpeed(record.speed))}
       ${renderFlightTooltipCell("進行方向", formatFlightHeading(record.track))}
       ${renderFlightTooltipCell("最終受信", formatFlightContact(record.lastContact))}
+    </div>
+  `;
+}
+
+function renderCompactFlightTooltip(record) {
+  const title = record.callsign || record.icao24 || "UNKNOWN";
+  const route = `${formatFlightCoordinate(record.latitude, true)} / ${formatFlightCoordinate(
+    record.longitude,
+    false
+  )}`;
+
+  return `
+    <p class="flight-tooltip__eyebrow">航空機</p>
+    <p class="flight-tooltip__title">${escapeHtml(title)}</p>
+    <p class="flight-tooltip__meta">${escapeHtml(route)}</p>
+    <div class="flight-tooltip__inline">
+      <span>${escapeHtml(formatFlightHeading(record.track))}</span>
+      <span>${escapeHtml(formatFlightSpeed(record.speed))}</span>
+    </div>
+  `;
+}
+
+function renderCompactShipTooltip(record) {
+  const title = record.name || record.callsign || record.id || "UNKNOWN";
+  const route = `${formatFlightCoordinate(record.latitude, true)} / ${formatFlightCoordinate(
+    record.longitude,
+    false
+  )}`;
+
+  return `
+    <p class="flight-tooltip__eyebrow">船舶</p>
+    <p class="flight-tooltip__title">${escapeHtml(title)}</p>
+    <p class="flight-tooltip__meta">${escapeHtml(route)}</p>
+    <div class="flight-tooltip__inline">
+      <span>${escapeHtml(formatFlightHeading(record.heading ?? record.course))}</span>
+      <span>${escapeHtml(formatShipSpeed(record.speedKnots))}</span>
     </div>
   `;
 }
@@ -1197,6 +1476,232 @@ function updateDetailFocus(intersection, latitude, longitude) {
   earthMaterial.uniforms.hiResMix.value = activeRegionalTexture
     ? getRegionalTextureStrength()
     : 0;
+}
+
+async function handleLocationSearchSubmit(event) {
+  event.preventDefault();
+
+  const query = locationSearchInput.value.trim();
+  if (!query) {
+    clearSearchResults();
+    setSearchStatus("地域名・建物名・座標を入力してください。");
+    return;
+  }
+
+  const coordinateMatch = parseCoordinateQuery(query);
+  if (coordinateMatch) {
+    activeSearchAbortController?.abort();
+    clearSearchResults();
+    moveCameraToLocation(coordinateMatch.latitude, coordinateMatch.longitude);
+    setSearchStatus(
+      `${formatLatitude(coordinateMatch.latitude)} / ${formatLongitude(
+        coordinateMatch.longitude
+      )} に移動しました。`
+    );
+    return;
+  }
+
+  const requestId = ++searchRequestId;
+  activeSearchAbortController?.abort();
+  activeSearchAbortController = new AbortController();
+  locationSearchSubmit.disabled = true;
+  setSearchStatus(`「${query}」を検索中...`);
+
+  try {
+    const results = await requestGeocodeResults(
+      query,
+      activeSearchAbortController.signal
+    );
+
+    if (requestId !== searchRequestId) {
+      return;
+    }
+
+    renderSearchResults(results);
+
+    if (results.length <= 0) {
+      setSearchStatus(`「${query}」に一致する候補が見つかりませんでした。`);
+      return;
+    }
+
+    moveCameraToLocation(results[0].latitude, results[0].longitude);
+    setSearchStatus(
+      `「${results[0].title}」へ移動しました。候補 ${results.length} 件から選び直せます。`
+    );
+  } catch (error) {
+    if (error.name === "AbortError" || requestId !== searchRequestId) {
+      return;
+    }
+
+    console.error(error);
+    clearSearchResults();
+    setSearchStatus("場所検索に失敗しました。時間をおいて再試行してください。");
+  } finally {
+    if (requestId === searchRequestId) {
+      activeSearchAbortController = null;
+      locationSearchSubmit.disabled = false;
+    }
+  }
+}
+
+async function requestGeocodeResults(query, signal) {
+  const requestUrl = new URL(APP_CONFIG.search.geocodeUrl, window.location.origin);
+  requestUrl.searchParams.set("q", query);
+  requestUrl.searchParams.set("limit", String(APP_CONFIG.search.resultLimit));
+  requestUrl.searchParams.set("lang", "ja,en");
+
+  const response = await fetch(requestUrl, {
+    cache: "no-store",
+    signal,
+  });
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok || data.ok === false) {
+    throw new Error(data.message || `Geocode request failed: ${response.status}`);
+  }
+
+  return Array.isArray(data.results)
+    ? data.results.filter(
+        (result) =>
+          Number.isFinite(result?.latitude) &&
+          Number.isFinite(result?.longitude)
+      )
+    : [];
+}
+
+function handleSearchResultClick(event) {
+  const button = event.target.closest("[data-search-index]");
+  if (!button) {
+    return;
+  }
+
+  const index = Number.parseInt(button.dataset.searchIndex ?? "", 10);
+  const result = currentSearchResults[index];
+
+  if (!result) {
+    return;
+  }
+
+  moveCameraToLocation(result.latitude, result.longitude);
+  setSearchStatus(`「${result.title}」へ移動しました。`);
+}
+
+function renderSearchResults(results) {
+  currentSearchResults = results;
+
+  if (results.length <= 0) {
+    clearSearchResults();
+    return;
+  }
+
+  searchResults.hidden = false;
+  searchResults.innerHTML = results
+    .map((result, index) => {
+      const subtitle =
+        result.subtitle && result.subtitle !== result.title
+          ? result.subtitle
+          : `${formatLatitude(result.latitude)} / ${formatLongitude(
+              result.longitude
+            )}`;
+
+      return `
+        <button
+          type="button"
+          class="search-result"
+          data-search-index="${index}"
+        >
+          <span class="search-result__title">${escapeHtml(result.title)}</span>
+          <span class="search-result__meta">${escapeHtml(subtitle)}</span>
+        </button>
+      `;
+    })
+    .join("");
+}
+
+function clearSearchResults() {
+  currentSearchResults = [];
+  searchResults.hidden = true;
+  searchResults.innerHTML = "";
+}
+
+function moveCameraToLocation(latitude, longitude, options = {}) {
+  clearControlMotion();
+
+  const currentDistance = camera.position.distanceTo(controls.target);
+  const targetDistance = THREE.MathUtils.clamp(
+    options.distance ?? Math.min(currentDistance, APP_CONFIG.search.focusDistance),
+    controls.minDistance,
+    controls.maxDistance
+  );
+  const targetDirection = latLonToSurfaceVector(
+    latitude,
+    longitude,
+    new THREE.Vector3()
+  ).normalize();
+
+  surfaceGroup.updateWorldMatrix(true, false);
+  surfaceGroup.localToWorld(targetDirection);
+  targetDirection.normalize();
+
+  cameraMoveAnimation = {
+    durationMs: options.durationMs ?? APP_CONFIG.search.moveDurationMs,
+    fromDirection: camera.position.clone().sub(controls.target).normalize(),
+    fromDistance: currentDistance,
+    rotation: new THREE.Quaternion(),
+    startTime: performance.now(),
+    toDirection: targetDirection.clone(),
+    toDistance: targetDistance,
+  };
+  cameraMoveAnimation.rotation.setFromUnitVectors(
+    cameraMoveAnimation.fromDirection,
+    cameraMoveAnimation.toDirection
+  );
+
+  selectedTrafficInfo = null;
+  hoveredTrafficInfo = null;
+  hideFlightTooltip();
+}
+
+function updateCameraMoveAnimation() {
+  if (!cameraMoveAnimation) {
+    return;
+  }
+
+  const elapsed = performance.now() - cameraMoveAnimation.startTime;
+  const progress = smooth01(
+    elapsed / Math.max(cameraMoveAnimation.durationMs, 1)
+  );
+  const distance = THREE.MathUtils.lerp(
+    cameraMoveAnimation.fromDistance,
+    cameraMoveAnimation.toDistance,
+    progress
+  );
+  const direction = cameraMoveVector
+    .copy(cameraMoveAnimation.fromDirection)
+    .applyQuaternion(
+      cameraMoveQuaternion
+        .copy(identityQuaternion)
+        .slerp(cameraMoveAnimation.rotation, progress)
+    )
+    .normalize();
+
+  camera.position.copy(direction.multiplyScalar(distance).add(controls.target));
+
+  if (progress >= 1) {
+    camera.position.copy(
+      cameraMoveVector
+        .copy(cameraMoveAnimation.toDirection)
+        .multiplyScalar(cameraMoveAnimation.toDistance)
+        .add(controls.target)
+    );
+    clearControlMotion();
+    cameraMoveAnimation = null;
+  }
+}
+
+function cancelCameraMoveAnimation() {
+  clearControlMotion();
+  cameraMoveAnimation = null;
 }
 
 async function loadTexture(path, options = {}) {
@@ -1540,11 +2045,17 @@ function exposeDebugBridge() {
         hasRegionalTexture: Boolean(activeRegionalTexture),
         activeRegionalKey: activeRegionalBounds?.key ?? null,
         pendingRegionalKey: pendingRegionalKey || null,
+        cameraMoveActive: Boolean(cameraMoveAnimation),
         flightsVisible,
         flightStatus: lastFlightStatusText,
         flightMarkers: flightPoints?.geometry?.attributes?.position?.count ?? 0,
         latitude: currentViewedLatitude,
         longitude: currentViewedLongitude,
+        cameraPosition: [
+          Number(camera.position.x.toFixed(6)),
+          Number(camera.position.y.toFixed(6)),
+          Number(camera.position.z.toFixed(6)),
+        ],
       };
     },
     setCameraDistance(distance) {
@@ -1559,6 +2070,21 @@ function exposeDebugBridge() {
       controls.update();
       updateViewedLocation();
       return nextDistance;
+    },
+    projectLatLon(latitude, longitude) {
+      const worldPoint = latLonToSurfaceVector(
+        latitude,
+        longitude,
+        new THREE.Vector3()
+      ).normalize();
+      surfaceGroup.updateWorldMatrix(true, false);
+      surfaceGroup.localToWorld(worldPoint);
+      worldPoint.normalize();
+      return [
+        Number(worldPoint.x.toFixed(6)),
+        Number(worldPoint.y.toFixed(6)),
+        Number(worldPoint.z.toFixed(6)),
+      ];
     },
     orbitByDegrees(deltaAzimuth, deltaPolar = 0) {
       const offset = camera.position.clone().sub(controls.target);
@@ -1694,6 +2220,101 @@ function normalizeDegrees(value) {
 function normalizeLongitude(value) {
   const normalized = ((value + 180) % 360 + 360) % 360 - 180;
   return normalized === -180 ? 180 : normalized;
+}
+
+function parseCoordinateQuery(query) {
+  const normalized = query
+    .trim()
+    .replaceAll("、", ",")
+    .replaceAll("，", ",")
+    .replace(/\s+/gu, " ");
+  const tokens = normalized
+    .split(/[,\s]+/u)
+    .map((token) => token.trim())
+    .filter(Boolean);
+
+  if (tokens.length !== 2) {
+    return null;
+  }
+
+  const firstOrientation = detectCoordinateOrientation(tokens[0]);
+  const secondOrientation = detectCoordinateOrientation(tokens[1]);
+  const firstAsLatitude = parseCoordinateToken(tokens[0], "lat");
+  const firstAsLongitude = parseCoordinateToken(tokens[0], "lon");
+  const secondAsLatitude = parseCoordinateToken(tokens[1], "lat");
+  const secondAsLongitude = parseCoordinateToken(tokens[1], "lon");
+
+  if (
+    (firstOrientation === "lat" || firstOrientation === null) &&
+    (secondOrientation === "lon" || secondOrientation === null) &&
+    Number.isFinite(firstAsLatitude) &&
+    Number.isFinite(secondAsLongitude)
+  ) {
+    return {
+      latitude: firstAsLatitude,
+      longitude: normalizeLongitude(secondAsLongitude),
+    };
+  }
+
+  if (
+    (firstOrientation === "lon" || firstOrientation === null) &&
+    (secondOrientation === "lat" || secondOrientation === null) &&
+    Number.isFinite(firstAsLongitude) &&
+    Number.isFinite(secondAsLatitude)
+  ) {
+    return {
+      latitude: secondAsLatitude,
+      longitude: normalizeLongitude(firstAsLongitude),
+    };
+  }
+
+  return null;
+}
+
+function detectCoordinateOrientation(token) {
+  const normalized = token.toUpperCase();
+
+  if (/[NS]/u.test(normalized)) {
+    return "lat";
+  }
+
+  if (/[EW]/u.test(normalized)) {
+    return "lon";
+  }
+
+  return null;
+}
+
+function parseCoordinateToken(token, orientation) {
+  const normalized = token.toUpperCase().replaceAll("°", "").trim();
+  const letterPattern = orientation === "lat" ? /[NS]/gu : /[EW]/gu;
+  const signLetters =
+    orientation === "lat"
+      ? { negative: "S", positive: "N" }
+      : { negative: "W", positive: "E" };
+  const letters = normalized.match(letterPattern) ?? [];
+  const signFromLetter = letters.some((letter) => letter === signLetters.negative)
+    ? -1
+    : letters.some((letter) => letter === signLetters.positive)
+      ? 1
+      : null;
+  const numericValue = Number.parseFloat(normalized.replace(/[NSEW]/gu, ""));
+
+  if (!Number.isFinite(numericValue)) {
+    return null;
+  }
+
+  const signedValue =
+    signFromLetter === null
+      ? numericValue
+      : Math.abs(numericValue) * signFromLetter;
+  const limit = orientation === "lat" ? 90 : 180;
+
+  if (Math.abs(signedValue) > limit) {
+    return null;
+  }
+
+  return signedValue;
 }
 
 function formatLatitude(value) {

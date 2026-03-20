@@ -20,8 +20,8 @@ export const APP_CONFIG = {
     dampingFactor: 0.07,
     closeDampingFactor: 0.12,
     precisionRampDistance: 2.2,
-    minPolarAngle: 0.45,
-    maxPolarAngle: Math.PI - 0.45,
+    minPolarAngle: 0.12,
+    maxPolarAngle: Math.PI - 0.12,
   },
   earth: {
     tiltDegrees: -23.5,
@@ -46,6 +46,18 @@ export const APP_CONFIG = {
     markerBaseRadius: 1.006,
     markerMinSize: 0.01,
     markerMaxSize: 0.016,
+  },
+  trafficInfo: {
+    compactBreakpoint: 760,
+    defaultMode: "detail",
+    dragThreshold: 10,
+    mobileDefaultMode: "simple",
+  },
+  search: {
+    geocodeUrl: "/api/geocode",
+    focusDistance: 2.05,
+    moveDurationMs: 980,
+    resultLimit: 5,
   },
   regionalTexture: {
     activationDistance: 1.22,

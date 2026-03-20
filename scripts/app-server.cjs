@@ -8,6 +8,7 @@ const projectRoot = path.resolve(__dirname, "..");
 const defaultHost = "127.0.0.1";
 const defaultPort = 4173;
 const AISSTREAM_URL = "wss://stream.aisstream.io/v0/stream";
+const NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search";
 const worldBoundingBoxes = [[[-90, -180], [90, 180]]];
 const shipMessageTypes = [
   "PositionReport",
@@ -16,6 +17,8 @@ const shipMessageTypes = [
   "ShipStaticData",
   "StaticDataReport",
 ];
+const geocodeCache = new Map();
+let geocodeQueue = Promise.resolve();
 
 const mimeTypes = new Map([
   [".css", "text/css; charset=UTF-8"],
@@ -240,6 +243,70 @@ async function handleShipSnapshotRequest(request, response) {
   }
 }
 
+async function handleGeocodeRequest(requestUrl, request, response) {
+  if (!["GET", "HEAD"].includes(request.method ?? "GET")) {
+    response.writeHead(405, {
+      Allow: "GET, HEAD",
+      "Content-Type": "text/plain; charset=UTF-8",
+    });
+    response.end("Method Not Allowed");
+    return;
+  }
+
+  const query = String(requestUrl.searchParams.get("q") ?? "").trim();
+  if (!query) {
+    sendJson(response, 400, {
+      code: "GEOCODE_QUERY_REQUIRED",
+      message: "Specify q=<place name> or use direct coordinates on the client.",
+      ok: false,
+    });
+    return;
+  }
+
+  const limit = clampInteger(
+    requestUrl.searchParams.get("limit"),
+    5,
+    1,
+    8
+  );
+  const acceptLanguage = sanitizeAcceptLanguage(
+    requestUrl.searchParams.get("lang") || "ja,en"
+  );
+  const cacheKey = `${acceptLanguage}:${limit}:${query.toLowerCase()}`;
+  const cachedPayload = getCachedGeocodePayload(cacheKey);
+
+  if (cachedPayload) {
+    sendJson(response, 200, cachedPayload);
+    return;
+  }
+
+  try {
+    const results = await queueGeocodeRequest(async () =>
+      requestGeocodeResults({
+        acceptLanguage,
+        limit,
+        query,
+      })
+    );
+    const payload = {
+      attribution: "Search data © OpenStreetMap contributors",
+      ok: true,
+      provider: "Nominatim",
+      query,
+      results,
+    };
+
+    setCachedGeocodePayload(cacheKey, payload);
+    sendJson(response, 200, payload);
+  } catch (error) {
+    sendJson(response, 502, {
+      code: "GEOCODE_REQUEST_FAILED",
+      message: error.message || "Failed to resolve the place name.",
+      ok: false,
+    });
+  }
+}
+
 function clampInteger(rawValue, fallback, min, max) {
   const parsed = Number.parseInt(rawValue ?? "", 10);
 
@@ -248,6 +315,162 @@ function clampInteger(rawValue, fallback, min, max) {
   }
 
   return Math.min(Math.max(parsed, min), max);
+}
+
+function getCachedGeocodePayload(cacheKey) {
+  const cached = geocodeCache.get(cacheKey);
+
+  if (!cached) {
+    return null;
+  }
+
+  if (Date.now() > cached.expiresAt) {
+    geocodeCache.delete(cacheKey);
+    return null;
+  }
+
+  return cached.payload;
+}
+
+function setCachedGeocodePayload(cacheKey, payload) {
+  geocodeCache.set(cacheKey, {
+    expiresAt: Date.now() + 1000 * 60 * 60 * 6,
+    payload,
+  });
+
+  if (geocodeCache.size <= 120) {
+    return;
+  }
+
+  const oldestKey = geocodeCache.keys().next().value;
+  if (oldestKey) {
+    geocodeCache.delete(oldestKey);
+  }
+}
+
+function queueGeocodeRequest(task) {
+  const minIntervalMs = clampInteger(
+    process.env.NOMINATIM_MIN_INTERVAL_MS,
+    1200,
+    1000,
+    10000
+  );
+
+  geocodeQueue = geocodeQueue
+    .catch(() => undefined)
+    .then(async () => {
+      const currentTime = Date.now();
+      const lastAllowedAt = queueGeocodeRequest.lastAllowedAt ?? 0;
+      const waitTime = Math.max(0, lastAllowedAt + minIntervalMs - currentTime);
+
+      if (waitTime > 0) {
+        await delay(waitTime);
+      }
+
+      queueGeocodeRequest.lastAllowedAt = Date.now();
+      return task();
+    });
+
+  return geocodeQueue;
+}
+
+function delay(waitTime) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, waitTime);
+  });
+}
+
+function sanitizeAcceptLanguage(rawValue) {
+  return String(rawValue || "ja,en")
+    .replace(/[^A-Za-z0-9,\-;.= ]/gu, "")
+    .trim()
+    .slice(0, 64) || "ja,en";
+}
+
+async function requestGeocodeResults({ acceptLanguage, limit, query }) {
+  const requestUrl = new URL(
+    process.env.NOMINATIM_SEARCH_URL || NOMINATIM_SEARCH_URL
+  );
+  requestUrl.searchParams.set("q", query);
+  requestUrl.searchParams.set("format", "jsonv2");
+  requestUrl.searchParams.set("addressdetails", "1");
+  requestUrl.searchParams.set("namedetails", "1");
+  requestUrl.searchParams.set("limit", String(limit));
+  requestUrl.searchParams.set("accept-language", acceptLanguage);
+
+  if (process.env.NOMINATIM_EMAIL) {
+    requestUrl.searchParams.set("email", process.env.NOMINATIM_EMAIL);
+  }
+
+  const headers = {
+    "Accept-Language": acceptLanguage,
+    "User-Agent":
+      process.env.NOMINATIM_USER_AGENT ||
+      "3D Earth Explorer/1.0 (+https://github.com/EldiEnfiel/my-app)",
+  };
+
+  const response = await fetch(requestUrl, {
+    headers,
+  });
+
+  if (!response.ok) {
+    throw new Error(`Nominatim request failed: ${response.status}`);
+  }
+
+  const data = await response.json();
+  if (!Array.isArray(data)) {
+    return [];
+  }
+
+  return data
+    .map(normalizeGeocodeResult)
+    .filter(Boolean)
+    .sort(
+      (left, right) =>
+        Number(right.importance ?? 0) - Number(left.importance ?? 0)
+    );
+}
+
+function normalizeGeocodeResult(result) {
+  const latitude = Number.parseFloat(result?.lat);
+  const longitude = Number.parseFloat(result?.lon);
+
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    return null;
+  }
+
+  const namedetails = result.namedetails ?? {};
+  const address = result.address ?? {};
+  const title =
+    cleanLabel(
+      namedetails["name:ja"] ||
+        namedetails.name ||
+        address.city ||
+        address.town ||
+        address.village ||
+        address.state ||
+        address.country ||
+        result.display_name
+    ) || "Unknown location";
+  const subtitle = cleanLabel(
+    result.display_name || result.name || `${latitude}, ${longitude}`
+  );
+
+  return {
+    displayName: subtitle,
+    importance: Number(result.importance ?? 0),
+    latitude,
+    longitude,
+    subtitle,
+    title,
+    type: cleanLabel(result.type || result.addresstype || result.class),
+  };
+}
+
+function cleanLabel(value) {
+  return String(value ?? "")
+    .replace(/\s+/gu, " ")
+    .trim();
 }
 
 function collectShipSnapshot({ apiKey, maxRecords, sampleDurationMs }) {
@@ -613,6 +836,11 @@ function createRequestHandler() {
 
     if (requestUrl.pathname === "/api/ships") {
       await handleShipSnapshotRequest(request, response);
+      return;
+    }
+
+    if (requestUrl.pathname === "/api/geocode") {
+      await handleGeocodeRequest(requestUrl, request, response);
       return;
     }
 
