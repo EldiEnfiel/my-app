@@ -1,0 +1,81 @@
+name: Deploy To EC2
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate deploy configuration
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+          DEPLOY_PORT: ${{ vars.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+        run: |
+          : "${DEPLOY_HOST:?Missing repository variable DEPLOY_HOST}"
+          : "${DEPLOY_PATH:?Missing repository variable DEPLOY_PATH}"
+          : "${DEPLOY_KNOWN_HOSTS:?Missing repository secret DEPLOY_KNOWN_HOSTS}"
+          : "${DEPLOY_SSH_PRIVATE_KEY:?Missing repository secret DEPLOY_SSH_PRIVATE_KEY}"
+          echo "DEPLOY_USER=${DEPLOY_USER:-ubuntu}" >> "$GITHUB_ENV"
+          echo "DEPLOY_PORT=${DEPLOY_PORT:-22}" >> "$GITHUB_ENV"
+
+      - name: Configure SSH
+        env:
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          printf '%s\n' "$DEPLOY_SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+      - name: Deploy
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+          DEPLOY_PORT: ${{ env.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ env.DEPLOY_USER }}
+        run: |
+          ssh \
+            -i ~/.ssh/id_ed25519 \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -p "$DEPLOY_PORT" \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
+          set -euo pipefail
+
+          cd "$DEPLOY_PATH"
+
+          if ! git diff --quiet -- package.json; then
+            git stash push -m "codex-deploy-packagejson" package.json
+          fi
+
+          if [[ -n "$(git status --porcelain)" ]]; then
+            echo "[deploy] Server repo has uncommitted changes. Aborting." >&2
+            git status --short >&2
+            exit 1
+          fi
+
+          git fetch origin
+          git checkout main
+          git pull --ff-only origin main
+          bash ./scripts/deploy-on-ec2.sh
+          REMOTE
