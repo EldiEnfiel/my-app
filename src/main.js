@@ -55,6 +55,7 @@ controls.minDistance = APP_CONFIG.controls.minDistance;
 controls.maxDistance = APP_CONFIG.controls.maxDistance;
 controls.rotateSpeed = APP_CONFIG.controls.rotateSpeed;
 controls.zoomSpeed = APP_CONFIG.controls.zoomSpeed;
+controls.dampingFactor = APP_CONFIG.controls.dampingFactor;
 controls.minPolarAngle = APP_CONFIG.controls.minPolarAngle;
 controls.maxPolarAngle = APP_CONFIG.controls.maxPolarAngle;
 controls.target.set(0, 0, 0);
@@ -280,6 +281,7 @@ async function init() {
   updateSolarState(activeDate);
   updateClockLabel(activeDate);
   updateFlightToggleUI();
+  updateControlSensitivity();
   updateViewedLocation();
   exposeDebugBridge();
   animate();
@@ -293,11 +295,36 @@ function animate() {
 
     updateSolarState(activeDate);
     updateClockLabel(activeDate);
+    updateControlSensitivity();
     controls.update();
     updateFlightMarkerScale();
     updateViewedLocation();
     renderer.render(scene, camera);
   });
+}
+
+function updateControlSensitivity() {
+  const distance = camera.position.distanceTo(controls.target);
+  const rampRatio = smooth01(
+    (distance - controls.minDistance) /
+      (APP_CONFIG.controls.precisionRampDistance - controls.minDistance)
+  );
+
+  controls.rotateSpeed = THREE.MathUtils.lerp(
+    APP_CONFIG.controls.closeRotateSpeed,
+    APP_CONFIG.controls.rotateSpeed,
+    rampRatio
+  );
+  controls.zoomSpeed = THREE.MathUtils.lerp(
+    APP_CONFIG.controls.closeZoomSpeed,
+    APP_CONFIG.controls.zoomSpeed,
+    rampRatio
+  );
+  controls.dampingFactor = THREE.MathUtils.lerp(
+    APP_CONFIG.controls.closeDampingFactor,
+    APP_CONFIG.controls.dampingFactor,
+    rampRatio
+  );
 }
 
 function updateSolarState(date) {
