@@ -1,5 +1,6 @@
 param(
     [switch]$SkipDiscord,
+    [switch]$SkipGitHubDeploySync,
     [switch]$SkipTunnel,
     [switch]$ValidateOnly
 )
@@ -7,6 +8,8 @@ param(
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $script:AwsCommandPath = ""
+$script:GitCommandPath = ""
+$script:GhCommandPath = ""
 $script:SshCommandPath = ""
 
 function Get-EnvValue {
@@ -84,6 +87,17 @@ function Require-CommandPath {
         "aws" {
             $FallbackPaths = @(
                 "C:\Program Files\Amazon\AWSCLIV2\aws.exe"
+            )
+        }
+        "gh" {
+            $FallbackPaths = @(
+                "C:\Program Files\GitHub CLI\gh.exe"
+            )
+        }
+        "git" {
+            $FallbackPaths = @(
+                "C:\Program Files\Git\cmd\git.exe",
+                "C:\Program Files\Git\bin\git.exe"
             )
         }
         "ssh" {
@@ -322,6 +336,114 @@ function Invoke-RemoteCommand {
     return $Result.StdOut
 }
 
+function Invoke-GhCommand {
+    param(
+        [string[]]$Arguments
+    )
+
+    $Result = Invoke-NativeCommandCapture -FilePath $script:GhCommandPath -Arguments $Arguments
+    if ($Result.ExitCode -ne 0) {
+        $Details = @($Result.StdErr, $Result.StdOut) | Where-Object { $_ }
+        throw "GitHub CLI command failed.`n$([string]::Join([Environment]::NewLine, $Details))"
+    }
+    return $Result.StdOut
+}
+
+function Assert-GitHubCliAuth {
+    $Result = Invoke-NativeCommandCapture -FilePath $script:GhCommandPath -Arguments @(
+        "auth",
+        "status",
+        "--hostname",
+        "github.com"
+    )
+    if ($Result.ExitCode -ne 0) {
+        $Details = @($Result.StdErr, $Result.StdOut) | Where-Object { $_ }
+        throw "GitHub CLI authentication is not available.`n$([string]::Join([Environment]::NewLine, $Details))"
+    }
+}
+
+function Get-GitHubRepoSlug {
+    $ConfiguredRepo = Get-EnvValue -Names @(
+        "THREE_D_EARTH_GITHUB_REPO"
+    )
+    if ($ConfiguredRepo) {
+        return $ConfiguredRepo
+    }
+
+    $Result = Invoke-NativeCommandCapture -FilePath $script:GitCommandPath -Arguments @(
+        "-C",
+        (Get-ProjectRoot),
+        "config",
+        "--get",
+        "remote.origin.url"
+    )
+    if ($Result.ExitCode -ne 0 -or -not $Result.StdOut) {
+        throw "Unable to determine GitHub repository from git remote.origin.url."
+    }
+
+    $RemoteUrl = $Result.StdOut.Trim()
+    $Patterns = @(
+        '^https://github\.com/(?<repo>[^/]+/[^/]+?)(?:\.git)?$',
+        '^ssh://git@[^/]+/(?<repo>[^/]+/[^/]+?)(?:\.git)?$',
+        '^git@[^:]+:(?<repo>[^/]+/[^/]+?)(?:\.git)?$'
+    )
+
+    foreach ($Pattern in $Patterns) {
+        if ($RemoteUrl -match $Pattern) {
+            return $Matches["repo"]
+        }
+    }
+
+    throw "Unable to parse GitHub repository from remote URL: $RemoteUrl"
+}
+
+function Get-RemoteSshEd25519PublicKey {
+    param(
+        [string[]]$SshArguments
+    )
+
+    $Key = Invoke-RemoteCommand `
+        -SshArguments $SshArguments `
+        -CommandText "awk 'NR==1 {print `$1 "" "" `$2}' /etc/ssh/ssh_host_ed25519_key.pub"
+
+    $NormalizedKey = $Key.Trim()
+    if (-not $NormalizedKey) {
+        throw "Remote host did not return an ED25519 SSH public key."
+    }
+    return $NormalizedKey
+}
+
+function Sync-GitHubDeploySettings {
+    param(
+        [string]$Repository,
+        [string[]]$SshArguments,
+        [string]$DeployHost
+    )
+
+    $RemoteHostKey = Get-RemoteSshEd25519PublicKey -SshArguments $SshArguments
+    $KnownHostsEntry = "$DeployHost $RemoteHostKey"
+
+    Invoke-GhCommand -Arguments @(
+        "variable",
+        "set",
+        "DEPLOY_HOST",
+        "--repo",
+        $Repository,
+        "--body",
+        $DeployHost
+    ) | Out-Null
+
+    Invoke-GhCommand -Arguments @(
+        "secret",
+        "set",
+        "DEPLOY_KNOWN_HOSTS",
+        "--repo",
+        $Repository,
+        "--body",
+        $KnownHostsEntry
+    ) | Out-Null
+}
+
 function Build-RemoteTunnelCommand {
     param(
         [string]$DeployPath,
@@ -527,6 +649,7 @@ $DiscordOwnerUserId = ""
 
 try {
     $script:AwsCommandPath = Require-CommandPath -CommandName "aws"
+    $script:GitCommandPath = Require-CommandPath -CommandName "git"
     $script:SshCommandPath = Require-CommandPath -CommandName "ssh"
     Assert-AwsCredentials
 
@@ -572,6 +695,23 @@ try {
         throw "SSH key path was not found: $SshKeyPath"
     }
 
+    $GitHubRepo = ""
+    $CanSyncGitHubDeploySettings = -not $SkipGitHubDeploySync
+    if ($CanSyncGitHubDeploySettings) {
+        try {
+            $script:GhCommandPath = Require-CommandPath -CommandName "gh"
+            Assert-GitHubCliAuth
+            $GitHubRepo = Get-GitHubRepoSlug
+        }
+        catch {
+            $CanSyncGitHubDeploySettings = $false
+            $Reason = $_.Exception.Message
+            if ($Reason) {
+                Write-Host "[github] deploy setting sync disabled: $Reason" -ForegroundColor Yellow
+            }
+        }
+    }
+
     if ($ValidateOnly) {
         $ValidateInstance = Get-InstanceInfo -InstanceId $InstanceId -Region $Region
         if ($null -eq $ValidateInstance) {
@@ -607,6 +747,15 @@ try {
         }
         else {
             Write-Host "[validate] ssh authentication: skipped (instance has no public host yet)"
+        }
+        if ($CanSyncGitHubDeploySettings) {
+            Write-Host "[validate] github deploy sync: $GitHubRepo"
+        }
+        elseif ($SkipGitHubDeploySync) {
+            Write-Host "[validate] github deploy sync: skipped by parameter"
+        }
+        else {
+            Write-Host "[validate] github deploy sync: unavailable"
         }
         if ($SkipTunnel) {
             Write-Host "[validate] tunnel: skipped by parameter"
@@ -672,11 +821,24 @@ try {
         throw "EC2 instance is running but has no public DNS or public IP."
     }
 
+    $GitHubDeployHost = $PublicIp
+    if (-not $GitHubDeployHost) {
+        $GitHubDeployHost = $PublicHost
+    }
+
     $SshArguments = Build-SshArguments `
         -User $DeployUser `
         -RemoteHost $PublicHost `
         -Port $DeployPort `
         -KeyPath $SshKeyPath
+
+    if ($CanSyncGitHubDeploySettings) {
+        Write-Host "[github] Syncing DEPLOY_HOST and DEPLOY_KNOWN_HOSTS for $GitHubRepo"
+        Sync-GitHubDeploySettings `
+            -Repository $GitHubRepo `
+            -SshArguments $SshArguments `
+            -DeployHost $GitHubDeployHost
+    }
 
     Write-Host "[remote] Deploying and starting app on $PublicHost"
     $null = Invoke-RemoteCommand `
