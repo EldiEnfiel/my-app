@@ -33,6 +33,72 @@ npm run publish:main -- "変更内容のメッセージ"
 
 GitHub への push と EC2 デプロイまでまとめて流す場合は `publish-and-deploy.bat` を使います。引数なしで実行すると commit message を聞き、push 完了後に Actions 画面を開きます。
 
+## EC2 起動と Discord 通知
+
+PC 再起動後に EC2 を起動し、アプリを再デプロイして、公開 URL を Discord DM で通知する場合は次を使います。
+
+```bat
+start-remote-3d-earth.bat
+```
+
+事前確認だけなら:
+
+```bat
+start-remote-3d-earth.bat -ValidateOnly
+```
+
+`-ValidateOnly` はコマンドの存在だけでなく、AWS 認証状態も確認します。`NoCredentials` が出る場合は、Windows 側で先に `aws login` を実行してください。
+
+Cloudflare quick tunnel を使わず、EC2 の public host をそのまま使う場合は:
+
+```bat
+start-remote-3d-earth.bat -SkipTunnel
+```
+
+### ローカル PC 側の前提
+
+- `aws` CLI が Windows の PATH に入っている
+- `aws login` などで、Windows 側の AWS CLI から EC2 を操作できる認証状態になっている
+- `ssh` が使える
+- Discord DM 通知を安定させる場合は、WSL と `../DiscorcCon/.venv` の `discord.py` が使える状態になっている
+- Discord 通知を使う場合は bot token と owner user id の環境変数が入っている
+
+### EC2 側の前提
+
+- リポジトリが `THREE_D_EARTH_DEPLOY_PATH` に clone 済み
+- `bash ./scripts/deploy-on-ec2.sh` が通る
+- Cloudflare URL を毎回取りたい場合は、EC2 に `cloudflared` がインストール済み
+
+### 必要な環境変数
+
+必須:
+
+- `THREE_D_EARTH_AWS_INSTANCE_ID`
+- `THREE_D_EARTH_DEPLOY_USER`
+- `THREE_D_EARTH_DEPLOY_PATH`
+
+任意:
+
+- `THREE_D_EARTH_AWS_REGION`
+- `THREE_D_EARTH_DEPLOY_PORT`
+- `THREE_D_EARTH_APP_PORT`
+- `THREE_D_EARTH_SSH_KEY_PATH`
+- `THREE_D_EARTH_DISCORD_BOT_TOKEN`
+- `THREE_D_EARTH_DISCORD_OWNER_USER_ID`
+
+Discord の値は、未指定なら既存の bridge 用 env を自動で見ます。
+
+- `CODEX_BRIDGE_DISCORD_TOKEN`
+- `CODEX_BRIDGE_DISCORD_OWNER_USER_ID`
+
+Cloudflare quick tunnel の URL 取得は EC2 上の `scripts/start-cloudflare-quick-tunnel.sh` が担当します。`trycloudflare.com` の一時 URL を起動ごとに取得し、その値を通知します。
+
+`THREE_D_EARTH_SSH_KEY_PATH` を省略した場合は、Windows 側で次の順に既定鍵を自動探索します。
+
+- `C:\Users\<user>\.ssh\3d-earth-actions-ec2`
+- `C:\Users\<user>\.ssh\id_ed25519`
+- `C:\Users\<user>\.ssh\id_rsa`
+
 ## Shared References
 
 - Blender: [/mnt/c/Users/nazok/OneDrive/ドキュメント/OpenAiCodex/shared-docs/blender-reference.md](/mnt/c/Users/nazok/OneDrive/ドキュメント/OpenAiCodex/shared-docs/blender-reference.md)
