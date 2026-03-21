@@ -7,6 +7,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+$script:DeployWorkflowFile = "deploy-ec2.yml"
 $script:AwsCommandPath = ""
 $script:GitCommandPath = ""
 $script:GhCommandPath = ""
@@ -421,7 +422,10 @@ function Sync-GitHubDeploySettings {
     param(
         [string]$Repository,
         [string[]]$SshArguments,
-        [string]$DeployHost
+        [string]$DeployHost,
+        [string]$DeployPath,
+        [int]$DeployPort,
+        [string]$DeployUser
     )
 
     $RemoteHostKey = Get-RemoteSshEd25519PublicKey -SshArguments $SshArguments
@@ -438,6 +442,36 @@ function Sync-GitHubDeploySettings {
     ) | Out-Null
 
     Invoke-GhCommand -Arguments @(
+        "variable",
+        "set",
+        "DEPLOY_PATH",
+        "--repo",
+        $Repository,
+        "--body",
+        $DeployPath
+    ) | Out-Null
+
+    Invoke-GhCommand -Arguments @(
+        "variable",
+        "set",
+        "DEPLOY_PORT",
+        "--repo",
+        $Repository,
+        "--body",
+        [string]$DeployPort
+    ) | Out-Null
+
+    Invoke-GhCommand -Arguments @(
+        "variable",
+        "set",
+        "DEPLOY_USER",
+        "--repo",
+        $Repository,
+        "--body",
+        $DeployUser
+    ) | Out-Null
+
+    Invoke-GhCommand -Arguments @(
         "secret",
         "set",
         "DEPLOY_KNOWN_HOSTS",
@@ -446,6 +480,161 @@ function Sync-GitHubDeploySettings {
         "--body",
         $KnownHostsEntry
     ) | Out-Null
+}
+
+function Get-GitHubActionsSecretNames {
+    param(
+        [string]$Repository
+    )
+
+    $Json = Invoke-GhCommand -Arguments @(
+        "secret",
+        "list",
+        "--repo",
+        $Repository,
+        "--app",
+        "actions",
+        "--json",
+        "name"
+    )
+    return @($Json | ConvertFrom-Json | ForEach-Object { $_.name })
+}
+
+function Test-GitHubActionsSecretExists {
+    param(
+        [string]$Repository,
+        [string]$SecretName
+    )
+
+    return (Get-GitHubActionsSecretNames -Repository $Repository) -contains $SecretName
+}
+
+function Get-GitAheadCount {
+    if (-not $script:GitCommandPath) {
+        $script:GitCommandPath = Require-CommandPath -CommandName "git"
+    }
+
+    $Result = Invoke-NativeCommandCapture -FilePath $script:GitCommandPath -Arguments @(
+        "-C",
+        (Get-ProjectRoot),
+        "rev-list",
+        "--count",
+        "origin/main..main"
+    )
+    if ($Result.ExitCode -ne 0 -or -not $Result.StdOut) {
+        return 0
+    }
+
+    try {
+        return [int]$Result.StdOut.Trim()
+    }
+    catch {
+        return 0
+    }
+}
+
+function Find-WorkflowRun {
+    param(
+        [string]$Repository,
+        [string]$WorkflowFile,
+        [DateTime]$StartedAfter
+    )
+
+    $StartedAfterUtc = $StartedAfter.ToUniversalTime().AddSeconds(-5)
+    for ($Attempt = 0; $Attempt -lt 20; $Attempt += 1) {
+        $Json = Invoke-GhCommand -Arguments @(
+            "run",
+            "list",
+            "--repo",
+            $Repository,
+            "--workflow",
+            $WorkflowFile,
+            "--branch",
+            "main",
+            "--event",
+            "workflow_dispatch",
+            "--limit",
+            "10",
+            "--json",
+            "databaseId,createdAt,status,conclusion,url"
+        )
+
+        $Runs = @($Json | ConvertFrom-Json)
+        $MatchingRun = $Runs |
+            Where-Object {
+                try {
+                    ([DateTimeOffset]::Parse($_.createdAt).UtcDateTime -ge $StartedAfterUtc)
+                }
+                catch {
+                    $false
+                }
+            } |
+            Sort-Object {
+                try {
+                    [DateTimeOffset]::Parse($_.createdAt).UtcDateTime
+                }
+                catch {
+                    [DateTimeOffset]::MinValue.UtcDateTime
+                }
+            } -Descending |
+            Select-Object -First 1
+
+        if ($MatchingRun) {
+            return $MatchingRun
+        }
+
+        Start-Sleep -Seconds 3
+    }
+
+    throw "Unable to locate the workflow_dispatch run for $WorkflowFile."
+}
+
+function Invoke-GitHubWorkflowDeploy {
+    param(
+        [string]$Repository,
+        [string]$WorkflowFile
+    )
+
+    $DispatchStartedAt = Get-Date
+    $DispatchOutput = Invoke-GhCommand -Arguments @(
+        "workflow",
+        "run",
+        $WorkflowFile,
+        "--repo",
+        $Repository,
+        "--ref",
+        "main"
+    )
+
+    $RunId = ""
+    if ($DispatchOutput -match '/actions/runs/(?<id>\d+)') {
+        $RunId = $Matches["id"]
+    }
+
+    if (-not $RunId) {
+        $Run = Find-WorkflowRun `
+            -Repository $Repository `
+            -WorkflowFile $WorkflowFile `
+            -StartedAfter $DispatchStartedAt
+        $RunId = [string]$Run.databaseId
+    }
+
+    if (-not $RunId) {
+        throw "Unable to determine the GitHub Actions run id for $WorkflowFile."
+    }
+
+    Write-Host "[github] Waiting for workflow run $RunId"
+    $null = Invoke-GhCommand -Arguments @(
+        "run",
+        "watch",
+        $RunId,
+        "--repo",
+        $Repository,
+        "--compact",
+        "--exit-status"
+    )
+
+    return $RunId
 }
 
 function Build-RemoteTunnelCommand {
@@ -700,11 +889,17 @@ try {
 
     $GitHubRepo = ""
     $CanSyncGitHubDeploySettings = -not $SkipGitHubDeploySync
+    $HasAisStreamSecret = $false
+    $LocalAheadCount = 0
     if ($CanSyncGitHubDeploySettings) {
         try {
             $script:GhCommandPath = Require-CommandPath -CommandName "gh"
             Assert-GitHubCliAuth
             $GitHubRepo = Get-GitHubRepoSlug
+            $HasAisStreamSecret = Test-GitHubActionsSecretExists `
+                -Repository $GitHubRepo `
+                -SecretName "AISSTREAM_API_KEY"
+            $LocalAheadCount = Get-GitAheadCount
         }
         catch {
             $CanSyncGitHubDeploySettings = $false
@@ -753,6 +948,15 @@ try {
         }
         if ($CanSyncGitHubDeploySettings) {
             Write-Host "[validate] github deploy sync: $GitHubRepo"
+            if ($HasAisStreamSecret) {
+                Write-Host "[validate] GitHub secret AISSTREAM_API_KEY: OK"
+            }
+            else {
+                Write-Host "[validate] GitHub secret AISSTREAM_API_KEY: missing"
+            }
+            if ($LocalAheadCount -gt 0) {
+                Write-Host "[validate] local main is ahead of origin/main by $LocalAheadCount commit(s)" -ForegroundColor Yellow
+            }
         }
         elseif ($SkipGitHubDeploySync) {
             Write-Host "[validate] github deploy sync: skipped by parameter"
@@ -840,13 +1044,31 @@ try {
         Sync-GitHubDeploySettings `
             -Repository $GitHubRepo `
             -SshArguments $SshArguments `
-            -DeployHost $GitHubDeployHost
+            -DeployHost $GitHubDeployHost `
+            -DeployPath $DeployPath `
+            -DeployPort $DeployPort `
+            -DeployUser $DeployUser
     }
 
-    Write-Host "[remote] Deploying and starting app on $PublicHost"
-    $null = Invoke-RemoteCommand `
-        -SshArguments $SshArguments `
-        -CommandText ("cd '{0}' && bash ./scripts/deploy-on-ec2.sh" -f $DeployPath.Replace("'", "'\''"))
+    if ($CanSyncGitHubDeploySettings) {
+        if (-not $HasAisStreamSecret) {
+            Write-Host "[github] AISSTREAM_API_KEY secret is missing. Ship overlay will remain unavailable until it is configured." -ForegroundColor Yellow
+        }
+        if ($LocalAheadCount -gt 0) {
+            Write-Host "[github] local main is ahead of origin/main by $LocalAheadCount commit(s); workflow deploy will use remote main." -ForegroundColor Yellow
+        }
+        Write-Host "[github] Dispatching GitHub Actions deploy workflow"
+        $RunId = Invoke-GitHubWorkflowDeploy `
+            -Repository $GitHubRepo `
+            -WorkflowFile $script:DeployWorkflowFile
+        Write-Host "[github] Workflow run succeeded: $RunId"
+    }
+    else {
+        Write-Host "[remote] Deploying and starting app on $PublicHost"
+        $null = Invoke-RemoteCommand `
+            -SshArguments $SshArguments `
+            -CommandText ("cd '{0}' && bash ./scripts/deploy-on-ec2.sh" -f $DeployPath.Replace("'", "'\''"))
+    }
 
     if ($SkipTunnel) {
         $Url = "http://${PublicHost}:$AppPort/"
