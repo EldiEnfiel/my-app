@@ -47,11 +47,34 @@ jobs:
 
       - name: Deploy
         env:
+          AISSTREAM_API_KEY: ${{ secrets.AISSTREAM_API_KEY }}
+          AISSTREAM_MAX_RECORDS: ${{ vars.AISSTREAM_MAX_RECORDS }}
+          AISSTREAM_SAMPLE_DURATION_MS: ${{ vars.AISSTREAM_SAMPLE_DURATION_MS }}
           DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
           DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
           DEPLOY_PORT: ${{ env.DEPLOY_PORT }}
           DEPLOY_USER: ${{ env.DEPLOY_USER }}
         run: |
+          quote_remote_env() {
+            printf "%q" "$1"
+          }
+
+          REMOTE_ENV=(
+            "DEPLOY_PATH=$(quote_remote_env "$DEPLOY_PATH")"
+          )
+
+          if [[ -n "${AISSTREAM_API_KEY:-}" ]]; then
+            REMOTE_ENV+=("AISSTREAM_API_KEY=$(quote_remote_env "$AISSTREAM_API_KEY")")
+          fi
+
+          if [[ -n "${AISSTREAM_SAMPLE_DURATION_MS:-}" ]]; then
+            REMOTE_ENV+=("AISSTREAM_SAMPLE_DURATION_MS=$(quote_remote_env "$AISSTREAM_SAMPLE_DURATION_MS")")
+          fi
+
+          if [[ -n "${AISSTREAM_MAX_RECORDS:-}" ]]; then
+            REMOTE_ENV+=("AISSTREAM_MAX_RECORDS=$(quote_remote_env "$AISSTREAM_MAX_RECORDS")")
+          fi
+
           ssh \
             -i ~/.ssh/id_ed25519 \
             -o BatchMode=yes \
@@ -59,7 +82,7 @@ jobs:
             -o StrictHostKeyChecking=yes \
             -p "$DEPLOY_PORT" \
             "$DEPLOY_USER@$DEPLOY_HOST" \
-            "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
+            "$(printf '%s ' "${REMOTE_ENV[@]}")bash -s" <<'REMOTE'
           set -euo pipefail
 
           cd "$DEPLOY_PATH"
