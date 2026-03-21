@@ -370,6 +370,10 @@ function Get-GitHubRepoSlug {
         return $ConfiguredRepo
     }
 
+    if (-not $script:GitCommandPath) {
+        $script:GitCommandPath = Require-CommandPath -CommandName "git"
+    }
+
     $Result = Invoke-NativeCommandCapture -FilePath $script:GitCommandPath -Arguments @(
         "-C",
         (Get-ProjectRoot),
@@ -649,7 +653,6 @@ $DiscordOwnerUserId = ""
 
 try {
     $script:AwsCommandPath = Require-CommandPath -CommandName "aws"
-    $script:GitCommandPath = Require-CommandPath -CommandName "git"
     $script:SshCommandPath = Require-CommandPath -CommandName "ssh"
     Assert-AwsCredentials
 
