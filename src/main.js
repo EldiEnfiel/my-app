@@ -22,6 +22,7 @@ const syncValue = document.querySelector("#sync-value");
 const clockValue = document.querySelector("#clock-value");
 const flightStatusValue = document.querySelector("#flight-status-value");
 const shipStatusValue = document.querySelector("#ship-status-value");
+const locationLogStatusValue = document.querySelector("#location-log-status-value");
 const flightTooltip = document.querySelector("#flight-tooltip");
 const locationSearchForm = document.querySelector("#location-search-form");
 const locationSearchInput = document.querySelector("#location-search-input");
@@ -141,6 +142,9 @@ let flightPointsMaterial;
 let shipLayer;
 let shipPoints;
 let shipPointsMaterial;
+let locationLogLayer;
+let locationLogPoints;
+let locationLogPointsMaterial;
 let activeRegionalTexture = null;
 let activeRegionalBounds = null;
 let currentViewedLatitude = null;
@@ -159,6 +163,7 @@ let regionalRequestId = 0;
 let lastClockText = "";
 let lastFlightStatusText = "表示オフ";
 let lastShipStatusText = "表示オフ";
+let lastLocationLogStatusText = "Waiting to load";
 let lastLatitudeText = "";
 let lastLongitudeText = "";
 let lastSearchStatusText = "";
@@ -183,6 +188,7 @@ syncValue.textContent = "PCの現在時刻と同期中";
 clockValue.textContent = "--";
 flightStatusValue.textContent = "表示オフ";
 shipStatusValue.textContent = "表示オフ";
+locationLogStatusValue.textContent = "Waiting to load";
 searchStatusValue.textContent = "日本語でも検索できます。Enter で座標へ移動します。";
 latitudeValue.textContent = "--";
 longitudeValue.textContent = "--";
@@ -338,6 +344,9 @@ async function init() {
   shipLayer = new THREE.Group();
   surfaceGroup.add(shipLayer);
 
+  locationLogLayer = new THREE.Group();
+  surfaceGroup.add(locationLogLayer);
+
   atmosphereMaterial = createAtmosphereMaterial();
   const atmosphereMesh = new THREE.Mesh(
     new THREE.SphereGeometry(
@@ -362,6 +371,7 @@ async function init() {
   updateClockLabel(activeDate);
   updateFlightToggleUI();
   updateShipToggleUI();
+  await loadLocationLogMarkers();
   updateTrafficInfoModeUI();
   setSearchStatus(searchStatusValue.textContent);
   updateControlSensitivity();
@@ -549,6 +559,15 @@ function setShipStatus(text) {
 
   lastShipStatusText = text;
   shipStatusValue.textContent = text;
+}
+
+function setLocationLogStatus(text) {
+  if (text === lastLocationLogStatusText) {
+    return;
+  }
+
+  lastLocationLogStatusText = text;
+  locationLogStatusValue.textContent = text;
 }
 
 function setSearchStatus(text) {
@@ -829,6 +848,55 @@ function hideFlightTooltip() {
   flightTooltip.classList.remove("is-visible");
 }
 
+async function loadLocationLogMarkers() {
+  if (!locationLogLayer) {
+    return;
+  }
+
+  setLocationLogStatus("Loading shared log...");
+  clearLocationLogMarkers();
+
+  try {
+    const response = await fetch(APP_CONFIG.locationLog.snapshotUrl, {
+      cache: "no-store",
+    });
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok || data.ok === false) {
+      throw new Error(
+        data.message || "Location log request failed: " + response.status
+      );
+    }
+
+    const records = Array.isArray(data.records) ? data.records : [];
+    const markerCount = populateLocationLogMarkers(records);
+    const invalidLineCount = Number.isFinite(data.invalidLineCount)
+      ? data.invalidLineCount
+      : 0;
+
+    if (markerCount <= 0) {
+      setLocationLogStatus(
+        invalidLineCount > 0
+          ? `No valid coordinates / invalid ${invalidLineCount} lines`
+          : "No location records"
+      );
+      return;
+    }
+
+    const latestRecord = records[records.length - 1];
+    const suffix = invalidLineCount > 0 ? ` / invalid ${invalidLineCount} lines` : "";
+    setLocationLogStatus(
+      latestRecord?.dateText
+        ? `${markerCount} markers / latest ${latestRecord.dateText}${suffix}`
+        : `${markerCount} markers${suffix}`
+    );
+  } catch (error) {
+    console.error(error);
+    clearLocationLogMarkers();
+    setLocationLogStatus("Shared log load failed");
+  }
+}
+
 async function loadFlightSnapshot() {
   if (!flightLayer) {
     flightsVisible = false;
@@ -1099,6 +1167,60 @@ function clearShipMarkers() {
   shipPoints = null;
 }
 
+function populateLocationLogMarkers(records) {
+  if (!locationLogLayer) {
+    return 0;
+  }
+
+  const visibleRecords = records.filter(
+    (record) =>
+      Number.isFinite(record?.latitude) && Number.isFinite(record?.longitude)
+  );
+
+  if (visibleRecords.length <= 0) {
+    clearLocationLogMarkers();
+    return 0;
+  }
+
+  const positions = new Float32Array(visibleRecords.length * 3);
+
+  visibleRecords.forEach((record, index) => {
+    latLonToSurfaceVector(
+      record.latitude,
+      record.longitude,
+      flightMarkerVector
+    ).multiplyScalar(APP_CONFIG.locationLog.markerBaseRadius);
+
+    const positionIndex = index * 3;
+    positions[positionIndex] = flightMarkerVector.x;
+    positions[positionIndex + 1] = flightMarkerVector.y;
+    positions[positionIndex + 2] = flightMarkerVector.z;
+  });
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geometry.computeBoundingSphere();
+
+  clearLocationLogMarkers();
+
+  locationLogPoints = new THREE.Points(geometry, getLocationLogMarkerMaterial());
+  locationLogPoints.userData.records = visibleRecords;
+  locationLogLayer.add(locationLogPoints);
+  updateTrafficMarkerScale();
+
+  return visibleRecords.length;
+}
+
+function clearLocationLogMarkers() {
+  if (!locationLogPoints || !locationLogLayer) {
+    return;
+  }
+
+  locationLogLayer.remove(locationLogPoints);
+  locationLogPoints.geometry.dispose();
+  locationLogPoints = null;
+}
+
 function getFlightMarkerMaterial() {
   if (!flightPointsMaterial) {
     flightPointsMaterial = createDirectionalMarkerMaterial(
@@ -1119,6 +1241,84 @@ function getShipMarkerMaterial() {
   }
 
   return shipPointsMaterial;
+}
+
+function getLocationLogMarkerMaterial() {
+  if (!locationLogPointsMaterial) {
+    locationLogPointsMaterial = createStaticMarkerMaterial(
+      createLocationLogMarkerTexture(),
+      APP_CONFIG.locationLog.markerMaxSize
+    );
+  }
+
+  return locationLogPointsMaterial;
+}
+
+function createStaticMarkerMaterial(markerMap, markerSize) {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      markerMap: { value: markerMap },
+      markerSize: { value: markerSize },
+      pointScale: { value: renderer.getPixelRatio() * window.innerHeight * 0.5 },
+    },
+    vertexShader: `
+      uniform float markerSize;
+      uniform float pointScale;
+
+      void main() {
+        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+        gl_PointSize = markerSize * pointScale / max(-mvPosition.z, 0.0001);
+        gl_Position = projectionMatrix * mvPosition;
+      }
+    `,
+    fragmentShader: `
+      uniform sampler2D markerMap;
+
+      void main() {
+        vec4 marker = texture2D(markerMap, gl_PointCoord);
+
+        if (marker.a < 0.12) {
+          discard;
+        }
+
+        gl_FragColor = marker;
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    depthTest: true,
+  });
+}
+
+function createLocationLogMarkerTexture() {
+  const size = 96;
+  const markerCanvas = document.createElement("canvas");
+  markerCanvas.width = size;
+  markerCanvas.height = size;
+
+  const context = markerCanvas.getContext("2d");
+  context.clearRect(0, 0, size, size);
+  context.translate(size / 2, size / 2);
+  context.shadowColor = "rgba(255, 203, 107, 0.5)";
+  context.shadowBlur = 18;
+  context.fillStyle = "rgba(255, 203, 107, 0.95)";
+  context.strokeStyle = "rgba(255, 247, 214, 0.98)";
+  context.lineWidth = 6;
+
+  context.beginPath();
+  context.arc(0, 0, 18, 0, Math.PI * 2);
+  context.fill();
+
+  context.beginPath();
+  context.arc(0, 0, 30, 0, Math.PI * 2);
+  context.stroke();
+
+  const texture = new THREE.CanvasTexture(markerCanvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.needsUpdate = true;
+  return texture;
 }
 
 function createDirectionalMarkerMaterial(markerMap, markerSize) {
@@ -1433,6 +1633,12 @@ function updateTrafficMarkerScale() {
     shipPointsMaterial,
     APP_CONFIG.ships.markerMinSize,
     APP_CONFIG.ships.markerMaxSize,
+    distanceFactor
+  );
+  updateDirectionalMarkerScale(
+    locationLogPointsMaterial,
+    APP_CONFIG.locationLog.markerMinSize,
+    APP_CONFIG.locationLog.markerMaxSize,
     distanceFactor
   );
 }
@@ -2049,6 +2255,10 @@ function exposeDebugBridge() {
         flightsVisible,
         flightStatus: lastFlightStatusText,
         flightMarkers: flightPoints?.geometry?.attributes?.position?.count ?? 0,
+        shipMarkers: shipPoints?.geometry?.attributes?.position?.count ?? 0,
+        locationLogMarkers:
+          locationLogPoints?.geometry?.attributes?.position?.count ?? 0,
+        locationLogStatus: lastLocationLogStatusText,
         latitude: currentViewedLatitude,
         longitude: currentViewedLongitude,
         cameraPosition: [

@@ -5,9 +5,11 @@ const { spawn } = require("child_process");
 const WebSocket = require("ws");
 
 const projectRoot = path.resolve(__dirname, "..");
+const sharedFilesRoot = path.resolve(projectRoot, "..", "shared-files");
+const myLocationLogPath = path.join(sharedFilesRoot, "mylocation.log");
 const defaultHost = "127.0.0.1";
 const defaultPort = 4173;
-const AISSTREAM_URL = "wss://stream.aisstream.io/v0/stream";
+const AISSTREAM_URL = process.env.AISSTREAM_URL || "wss://stream.aisstream.io/v0/stream";
 const NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search";
 const worldBoundingBoxes = [[[-90, -180], [90, 180]]];
 const shipMessageTypes = [
@@ -19,6 +21,20 @@ const shipMessageTypes = [
 ];
 const geocodeCache = new Map();
 let geocodeQueue = Promise.resolve();
+const shipCacheState = {
+  activeApiKey: "",
+  connection: null,
+  connectedAt: 0,
+  isStarting: false,
+  isWarm: false,
+  lastError: "",
+  lastMessageAt: 0,
+  pruneTimer: null,
+  reconnectTimer: null,
+  records: new Map(),
+  startPromise: null,
+  waiters: new Set(),
+};
 
 const mimeTypes = new Map([
   [".css", "text/css; charset=UTF-8"],
@@ -99,7 +115,9 @@ function loadEnvironmentFiles(rootDir) {
 function parseEnvFile(content) {
   const values = {};
 
-  for (const rawLine of content.split(/\r?\n/u)) {
+  const normalizedContent = String(content).replace(/^\uFEFF/u, "");
+
+  for (const rawLine of normalizedContent.split(/\r?\n/u)) {
     const line = rawLine.trim();
 
     if (!line || line.startsWith("#")) {
@@ -186,6 +204,134 @@ async function serveStaticFile(requestPathname, response) {
   }
 }
 
+function parseLocationLogDate(dateText) {
+  const match = String(dateText || "").match(
+    /^(\d{4})\/(\d{1,2})\/(\d{1,2})\s+(\d{1,2}):(\d{2})$/u
+  );
+
+  if (!match) {
+    return null;
+  }
+
+  const [, year, month, day, hour, minute] = match;
+  const parsedDate = new Date(
+    Number.parseInt(year, 10),
+    Number.parseInt(month, 10) - 1,
+    Number.parseInt(day, 10),
+    Number.parseInt(hour, 10),
+    Number.parseInt(minute, 10),
+    0,
+    0
+  );
+
+  return Number.isNaN(parsedDate.getTime()) ? null : parsedDate;
+}
+
+function parseLocationLogEntries(content) {
+  const records = [];
+  let invalidLineCount = 0;
+
+  for (const [index, rawLine] of content.split(/\r?\n/u).entries()) {
+    const line = rawLine.trim();
+
+    if (!line) {
+      continue;
+    }
+
+    const match = line.match(
+      /^(\d{4}\/\d{1,2}\/\d{1,2}\s+\d{1,2}:\d{2})(?:\s+|\t+)([-+]?\d+(?:\.\d+)?)\s*,\s*([-+]?\d+(?:\.\d+)?)$/u
+    );
+
+    if (!match) {
+      invalidLineCount += 1;
+      continue;
+    }
+
+    const [, dateText, latitudeText, longitudeText] = match;
+    const latitude = Number.parseFloat(latitudeText);
+    const longitude = Number.parseFloat(longitudeText);
+
+    if (
+      !Number.isFinite(latitude) ||
+      !Number.isFinite(longitude) ||
+      latitude < -90 ||
+      latitude > 90 ||
+      longitude < -180 ||
+      longitude > 180
+    ) {
+      invalidLineCount += 1;
+      continue;
+    }
+
+    const parsedDate = parseLocationLogDate(dateText);
+    records.push({
+      dateText,
+      latitude,
+      lineNumber: index + 1,
+      longitude,
+      timestampMs: parsedDate ? parsedDate.getTime() : null,
+    });
+  }
+
+  records.sort((left, right) => {
+    const leftTime = Number.isFinite(left.timestampMs) ? left.timestampMs : Infinity;
+    const rightTime = Number.isFinite(right.timestampMs) ? right.timestampMs : Infinity;
+
+    if (leftTime !== rightTime) {
+      return leftTime - rightTime;
+    }
+
+    return left.lineNumber - right.lineNumber;
+  });
+
+  return { invalidLineCount, records };
+}
+
+async function handleMyLocationRequest(request, response) {
+  if (!["GET", "HEAD"].includes(request.method ?? "GET")) {
+    response.writeHead(405, {
+      Allow: "GET, HEAD",
+      "Content-Type": "text/plain; charset=UTF-8",
+    });
+    response.end("Method Not Allowed");
+    return;
+  }
+
+  try {
+    if (!fs.existsSync(myLocationLogPath)) {
+      sendJson(response, 200, {
+        ok: true,
+        invalidLineCount: 0,
+        message: "mylocation.log was not found.",
+        recordCount: 0,
+        records: [],
+        source: "mylocation.log",
+      });
+      return;
+    }
+
+    const content = await fs.promises.readFile(myLocationLogPath, "utf8");
+    const { invalidLineCount, records } = parseLocationLogEntries(content);
+
+    sendJson(response, 200, {
+      ok: true,
+      invalidLineCount,
+      message:
+        records.length > 0
+          ? "Location log records loaded."
+          : "No valid latitude/longitude records were found in mylocation.log.",
+      recordCount: records.length,
+      records,
+      source: "mylocation.log",
+    });
+  } catch (error) {
+    sendJson(response, 500, {
+      code: "MYLOCATION_LOG_READ_FAILED",
+      message: error.message || "Failed to read mylocation.log.",
+      ok: false,
+    });
+  }
+}
 async function handleShipSnapshotRequest(request, response) {
   if (!["GET", "HEAD"].includes(request.method ?? "GET")) {
     response.writeHead(405, {
@@ -208,31 +354,33 @@ async function handleShipSnapshotRequest(request, response) {
   }
 
   try {
-    const sampleDurationMs = clampInteger(
-      process.env.AISSTREAM_SAMPLE_DURATION_MS,
-      4500,
-      1500,
-      12000
-    );
-    const maxRecords = clampInteger(
-      process.env.AISSTREAM_MAX_RECORDS,
-      2200,
-      300,
-      5000
-    );
-    const records = await collectShipSnapshot({
-      apiKey,
-      maxRecords,
-      sampleDurationMs,
-    });
+    const options = getShipCollectorOptions();
+    ensureShipCacheCollector(apiKey, options);
+
+    let snapshot = getShipCacheSnapshot(options);
+    if (snapshot.records.length <= 0) {
+      await waitForShipCacheWarmup(options.initialWaitMs);
+      snapshot = getShipCacheSnapshot(options);
+    }
+
+    if (snapshot.records.length <= 0 && shipCacheState.lastError) {
+      throw new Error(shipCacheState.lastError);
+    }
 
     sendJson(response, 200, {
       ok: true,
       provider: "AISStream",
-      recordCount: records.length,
-      sampleDurationMs,
-      sampledAt: new Date().toISOString(),
-      records,
+      collectionMode: "background-cache",
+      cacheAgeMs: snapshot.cacheAgeMs,
+      cacheTtlMs: options.cacheTtlMs,
+      cachedRecordCount: snapshot.cachedRecordCount,
+      connectedAt: snapshot.connectedAt,
+      initialWaitMs: options.initialWaitMs,
+      lastMessageAt: snapshot.lastMessageAt,
+      recordCount: snapshot.records.length,
+      responseMaxRecords: options.responseMaxRecords,
+      sampledAt: snapshot.sampledAt,
+      records: snapshot.records,
     });
   } catch (error) {
     sendJson(response, 502, {
@@ -473,69 +621,92 @@ function cleanLabel(value) {
     .trim();
 }
 
-function collectShipSnapshot({ apiKey, maxRecords, sampleDurationMs }) {
-  return new Promise((resolve, reject) => {
-    const records = new Map();
+function getShipCollectorOptions() {
+  return {
+    cacheMaxRecords: clampInteger(
+      process.env.AISSTREAM_CACHE_MAX_RECORDS,
+      12000,
+      1000,
+      50000
+    ),
+    cacheTtlMs: clampInteger(
+      process.env.AISSTREAM_CACHE_TTL_MS,
+      1000 * 60 * 20,
+      1000 * 60 * 2,
+      1000 * 60 * 60 * 6
+    ),
+    initialWaitMs: clampInteger(
+      process.env.AISSTREAM_INITIAL_WAIT_MS ?? process.env.AISSTREAM_SAMPLE_DURATION_MS,
+      4500,
+      500,
+      15000
+    ),
+    reconnectDelayMs: clampInteger(
+      process.env.AISSTREAM_RECONNECT_DELAY_MS,
+      3000,
+      500,
+      30000
+    ),
+    responseMaxRecords: clampInteger(
+      process.env.AISSTREAM_RESPONSE_MAX_RECORDS ?? process.env.AISSTREAM_MAX_RECORDS,
+      6000,
+      300,
+      20000
+    ),
+  };
+}
+
+function ensureShipCacheCollector(apiKey, options = getShipCollectorOptions()) {
+  if (!apiKey) {
+    return null;
+  }
+
+  if (shipCacheState.activeApiKey && shipCacheState.activeApiKey !== apiKey) {
+    resetShipCacheCollector();
+  }
+
+  shipCacheState.activeApiKey = apiKey;
+
+  if (shipCacheState.pruneTimer == null) {
+    shipCacheState.pruneTimer = setInterval(() => {
+      pruneShipCache(options);
+    }, 60 * 1000);
+
+    shipCacheState.pruneTimer.unref?.();
+  }
+
+  if (
+    shipCacheState.connection &&
+    (shipCacheState.connection.readyState === WebSocket.OPEN ||
+      shipCacheState.connection.readyState === WebSocket.CONNECTING)
+  ) {
+    return shipCacheState.startPromise;
+  }
+
+  if (shipCacheState.isStarting) {
+    return shipCacheState.startPromise;
+  }
+
+  shipCacheState.isStarting = true;
+  shipCacheState.startPromise = new Promise((resolve) => {
     const socket = new WebSocket(AISSTREAM_URL, {
       handshakeTimeout: 10000,
     });
-    let settled = false;
 
-    const finish = (error) => {
-      if (settled) {
+    shipCacheState.connection = socket;
+
+    const finishStart = () => {
+      if (!shipCacheState.isStarting) {
         return;
       }
 
-      settled = true;
-      clearTimeout(sampleTimer);
-      clearTimeout(handshakeTimer);
-
-      socket.removeAllListeners();
-
-      if (
-        socket.readyState === WebSocket.OPEN ||
-        socket.readyState === WebSocket.CONNECTING
-      ) {
-        socket.close();
-      }
-
-      if (error) {
-        reject(error);
-        return;
-      }
-
-      resolve(
-        Array.from(records.values())
-          .filter(
-            (record) =>
-              Number.isFinite(record.latitude) && Number.isFinite(record.longitude)
-          )
-          .sort((left, right) => right.lastUpdateMs - left.lastUpdateMs)
-          .map((record) => ({
-            callsign: record.callsign,
-            course: record.course,
-            destination: record.destination,
-            heading: record.heading,
-            id: record.id,
-            lastUpdate: new Date(record.lastUpdateMs).toISOString(),
-            latitude: record.latitude,
-            longitude: record.longitude,
-            name: record.name,
-            speedKnots: record.speedKnots,
-            shipType: record.shipType,
-          }))
-      );
+      shipCacheState.isStarting = false;
+      resolve();
     };
 
-    const handshakeTimer = setTimeout(() => {
-      finish(new Error("AIS stream connection timed out."));
-    }, 12000);
-
-    const sampleTimer = setTimeout(() => {
-      finish();
-    }, sampleDurationMs);
-
     socket.on("open", () => {
+      shipCacheState.connectedAt = Date.now();
+      shipCacheState.lastError = "";
       socket.send(
         JSON.stringify({
           APIKey: apiKey,
@@ -543,6 +714,7 @@ function collectShipSnapshot({ apiKey, maxRecords, sampleDurationMs }) {
           FilterMessageTypes: shipMessageTypes,
         })
       );
+      finishStart();
     });
 
     socket.on("message", (rawData) => {
@@ -555,7 +727,8 @@ function collectShipSnapshot({ apiKey, maxRecords, sampleDurationMs }) {
       }
 
       if (typeof payload?.error === "string") {
-        finish(new Error(payload.error));
+        shipCacheState.lastError = payload.error;
+        socket.close();
         return;
       }
 
@@ -564,27 +737,183 @@ function collectShipSnapshot({ apiKey, maxRecords, sampleDurationMs }) {
         return;
       }
 
-      const current = records.get(normalized.id) ?? {
+      const current = shipCacheState.records.get(normalized.id) ?? {
         id: normalized.id,
         lastUpdateMs: 0,
       };
 
       mergeShipRecord(current, normalized);
-      records.set(normalized.id, current);
+      shipCacheState.records.set(normalized.id, current);
+      shipCacheState.lastMessageAt = Date.now();
+      shipCacheState.isWarm = true;
 
-      if (records.size >= maxRecords) {
-        finish();
+      if (shipCacheState.records.size > options.cacheMaxRecords * 1.05) {
+        pruneShipCache(options);
       }
+
+      resolveShipCacheWaiters();
     });
 
     socket.on("error", (error) => {
-      finish(error);
+      shipCacheState.lastError = error?.message || "AIS stream connection failed.";
     });
 
     socket.on("close", () => {
-      finish();
+      if (shipCacheState.connection === socket) {
+        shipCacheState.connection = null;
+      }
+
+      finishStart();
+      scheduleShipCacheReconnect(options);
     });
   });
+
+  return shipCacheState.startPromise;
+}
+
+function scheduleShipCacheReconnect(options = getShipCollectorOptions()) {
+  if (!shipCacheState.activeApiKey || shipCacheState.reconnectTimer != null) {
+    return;
+  }
+
+  shipCacheState.reconnectTimer = setTimeout(() => {
+    shipCacheState.reconnectTimer = null;
+    ensureShipCacheCollector(shipCacheState.activeApiKey, options);
+  }, options.reconnectDelayMs);
+
+  shipCacheState.reconnectTimer.unref?.();
+}
+
+function waitForShipCacheWarmup(timeoutMs) {
+  if (shipCacheState.isWarm && shipCacheState.records.size > 0) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    const waiter = () => {
+      cleanup();
+      resolve();
+    };
+
+    const timeout = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, timeoutMs);
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      shipCacheState.waiters.delete(waiter);
+    };
+
+    shipCacheState.waiters.add(waiter);
+  });
+}
+
+function resolveShipCacheWaiters() {
+  const waiters = Array.from(shipCacheState.waiters);
+  shipCacheState.waiters.clear();
+
+  for (const waiter of waiters) {
+    waiter();
+  }
+}
+
+function pruneShipCache(options = getShipCollectorOptions()) {
+  const expiryCutoff = Date.now() - options.cacheTtlMs;
+
+  for (const [id, record] of shipCacheState.records) {
+    if (!Number.isFinite(record.lastUpdateMs) || record.lastUpdateMs < expiryCutoff) {
+      shipCacheState.records.delete(id);
+    }
+  }
+
+  if (shipCacheState.records.size <= options.cacheMaxRecords) {
+    return;
+  }
+
+  const newestRecords = Array.from(shipCacheState.records.values()).sort(
+    (left, right) => right.lastUpdateMs - left.lastUpdateMs
+  );
+  shipCacheState.records.clear();
+
+  newestRecords.slice(0, options.cacheMaxRecords).forEach((record) => {
+    shipCacheState.records.set(record.id, record);
+  });
+}
+
+function getShipCacheSnapshot(options = getShipCollectorOptions()) {
+  pruneShipCache(options);
+
+  const sampledAt = shipCacheState.lastMessageAt || shipCacheState.connectedAt || Date.now();
+  const visibleRecords = Array.from(shipCacheState.records.values())
+    .filter(
+      (record) =>
+        Number.isFinite(record.latitude) &&
+        Number.isFinite(record.longitude) &&
+        Number.isFinite(record.lastUpdateMs)
+    )
+    .sort((left, right) => right.lastUpdateMs - left.lastUpdateMs)
+    .slice(0, options.responseMaxRecords)
+    .map((record) => ({
+      callsign: record.callsign,
+      course: record.course,
+      destination: record.destination,
+      heading: record.heading,
+      id: record.id,
+      lastUpdate: new Date(record.lastUpdateMs).toISOString(),
+      latitude: record.latitude,
+      longitude: record.longitude,
+      name: record.name,
+      shipType: record.shipType,
+      speedKnots: record.speedKnots,
+    }));
+
+  return {
+    cacheAgeMs: Math.max(0, Date.now() - sampledAt),
+    cachedRecordCount: shipCacheState.records.size,
+    connectedAt:
+      shipCacheState.connectedAt > 0
+        ? new Date(shipCacheState.connectedAt).toISOString()
+        : null,
+    lastMessageAt:
+      shipCacheState.lastMessageAt > 0
+        ? new Date(shipCacheState.lastMessageAt).toISOString()
+        : null,
+    records: visibleRecords,
+    sampledAt: new Date(sampledAt).toISOString(),
+  };
+}
+
+function resetShipCacheCollector() {
+  if (shipCacheState.reconnectTimer != null) {
+    clearTimeout(shipCacheState.reconnectTimer);
+    shipCacheState.reconnectTimer = null;
+  }
+
+  if (shipCacheState.pruneTimer != null) {
+    clearInterval(shipCacheState.pruneTimer);
+    shipCacheState.pruneTimer = null;
+  }
+
+  if (
+    shipCacheState.connection &&
+    (shipCacheState.connection.readyState === WebSocket.OPEN ||
+      shipCacheState.connection.readyState === WebSocket.CONNECTING)
+  ) {
+    shipCacheState.connection.removeAllListeners();
+    shipCacheState.connection.close();
+  }
+
+  shipCacheState.activeApiKey = "";
+  shipCacheState.connection = null;
+  shipCacheState.connectedAt = 0;
+  shipCacheState.isStarting = false;
+  shipCacheState.isWarm = false;
+  shipCacheState.lastError = "";
+  shipCacheState.lastMessageAt = 0;
+  shipCacheState.records.clear();
+  shipCacheState.startPromise = null;
+  resolveShipCacheWaiters();
 }
 
 function normalizeShipMessage(payload) {
@@ -839,6 +1168,11 @@ function createRequestHandler() {
       return;
     }
 
+    if (requestUrl.pathname === "/api/mylocations") {
+      await handleMyLocationRequest(request, response);
+      return;
+    }
+
     if (requestUrl.pathname === "/api/geocode") {
       await handleGeocodeRequest(requestUrl, request, response);
       return;
@@ -884,6 +1218,7 @@ function openBrowser(url) {
 
 async function startServer(options = {}) {
   loadEnvironmentFiles(projectRoot);
+  ensureShipCacheCollector(process.env.AISSTREAM_API_KEY, getShipCollectorOptions());
 
   const host = options.host ?? defaultHost;
   const requestedPort = Number.isFinite(options.port) ? options.port : defaultPort;
@@ -916,6 +1251,7 @@ async function main() {
   const { server } = await startServer(options);
 
   const shutdown = () => {
+    resetShipCacheCollector();
     server.close(() => process.exit(0));
   };
 

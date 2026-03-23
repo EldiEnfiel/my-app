@@ -282,6 +282,105 @@ function Wait-Aws {
     }
 }
 
+function Get-InstanceStopAlarms {
+    param(
+        [string]$InstanceId,
+        [string]$Region
+    )
+
+    $AlarmResponse = Invoke-AwsJson -Region $Region -Arguments @(
+        "cloudwatch",
+        "describe-alarms",
+        "--output",
+        "json"
+    )
+
+    $MetricAlarms = @()
+    if ($null -ne $AlarmResponse -and $null -ne $AlarmResponse.MetricAlarms) {
+        $MetricAlarms = @($AlarmResponse.MetricAlarms)
+    }
+
+    $Matches = foreach ($Alarm in $MetricAlarms) {
+        $Dimensions = @()
+        if ($null -ne $Alarm.Dimensions) {
+            $Dimensions = @($Alarm.Dimensions)
+        }
+        $MatchesInstance = $false
+        foreach ($Dimension in $Dimensions) {
+            if ([string]$Dimension.Name -eq "InstanceId" -and [string]$Dimension.Value -eq $InstanceId) {
+                $MatchesInstance = $true
+                break
+            }
+        }
+        if (-not $MatchesInstance) {
+            continue
+        }
+
+        $AlarmActions = @()
+        if ($null -ne $Alarm.AlarmActions) {
+            $AlarmActions = @($Alarm.AlarmActions)
+        }
+        $HasStopAction = $false
+        foreach ($Action in $AlarmActions) {
+            if ("$Action" -like "*AWS_EC2.InstanceId.Stop*") {
+                $HasStopAction = $true
+                break
+            }
+        }
+        if (-not $HasStopAction) {
+            continue
+        }
+
+        [pscustomobject]@{
+            AlarmName = [string]$Alarm.AlarmName
+            ActionsEnabled = [bool]$Alarm.ActionsEnabled
+            StateValue = [string]$Alarm.StateValue
+        }
+    }
+
+    return @($Matches | Sort-Object AlarmName -Unique)
+}
+
+function Set-CloudWatchAlarmActionsEnabled {
+    param(
+        [string[]]$AlarmNames,
+        [string]$Region,
+        [bool]$Enable
+    )
+
+    $CleanAlarmNames = @(
+        $AlarmNames |
+            ForEach-Object { "$_".Trim() } |
+            Where-Object { $_ }
+    )
+    if ($CleanAlarmNames.Count -eq 0) {
+        return
+    }
+
+    $AwsArguments = @("cloudwatch")
+    if ($Enable) {
+        $AwsArguments += "enable-alarm-actions"
+    }
+    else {
+        $AwsArguments += "disable-alarm-actions"
+    }
+    $AwsArguments += "--alarm-names"
+    $AwsArguments += $CleanAlarmNames
+
+    $FullArguments = @()
+    if ($Region) {
+        $FullArguments += @("--region", $Region)
+    }
+    $FullArguments += $AwsArguments
+
+    $Result = Invoke-NativeCommandCapture -FilePath $script:AwsCommandPath -Arguments $FullArguments
+    if ($Result.ExitCode -ne 0) {
+        $Details = @($Result.StdErr, $Result.StdOut) | Where-Object { $_ }
+        $Mode = if ($Enable) { "enable" } else { "disable" }
+        throw "Failed to $Mode CloudWatch alarm actions for $([string]::Join(', ', $CleanAlarmNames)).`n$([string]::Join([Environment]::NewLine, $Details))"
+    }
+}
+
 function Get-InstanceInfo {
     param(
         [string]$InstanceId,
@@ -837,8 +936,33 @@ function Build-StartupSummary {
     return [string]::Join([Environment]::NewLine, $Lines)
 }
 
+function Normalize-StartupUrl {
+    param(
+        [string]$Value,
+        [string]$Label
+    )
+
+    $TrimmedValue = "$Value".Trim()
+    if (-not $TrimmedValue) {
+        throw "$Label was empty."
+    }
+
+    $UrlMatches = [System.Text.RegularExpressions.Regex]::Matches($TrimmedValue, "https?://\S+")
+    if ($UrlMatches.Count -gt 0) {
+        return $UrlMatches[$UrlMatches.Count - 1].Value.Trim()
+    }
+
+    if ($TrimmedValue -notmatch "\s") {
+        return $TrimmedValue
+    }
+
+    throw "$Label did not contain a usable URL.`n$TrimmedValue"
+}
+
 $DiscordToken = ""
 $DiscordOwnerUserId = ""
+$StopAlarms = @()
+$StopAlarmNamesToReenable = @()
 
 try {
     $script:AwsCommandPath = Require-CommandPath -CommandName "aws"
@@ -868,6 +992,9 @@ try {
     $SshKeyPath = Get-EnvValue -Names @(
         "THREE_D_EARTH_SSH_KEY_PATH"
     )
+    $StopAlarms = Get-InstanceStopAlarms -InstanceId $InstanceId -Region $Region
+    $EnabledStopAlarms = @($StopAlarms | Where-Object { $_.ActionsEnabled })
+    $EnabledStopAlarmNames = @($EnabledStopAlarms | ForEach-Object { $_.AlarmName })
     if (-not $SshKeyPath) {
         $SshKeyPath = Get-DefaultSshKeyPath
     }
@@ -976,6 +1103,22 @@ try {
         else {
             Write-Host "[validate] discord owner user id: $DiscordOwnerUserId"
         }
+        if ($StopAlarms.Count -eq 0) {
+            Write-Host "[validate] stop alarms: none"
+        }
+        else {
+            $RenderedStopAlarms = @(
+                $StopAlarms |
+                    ForEach-Object {
+                        $ActionState = if ($_.ActionsEnabled) { "enabled" } else { "disabled" }
+                        "{0} ({1}, state={2})" -f $_.AlarmName, $ActionState, $_.StateValue
+                    }
+            )
+            Write-Host "[validate] stop alarms: $([string]::Join('; ', $RenderedStopAlarms))"
+            if ($EnabledStopAlarmNames.Count -gt 0) {
+                Write-Host "[validate] startup will temporarily disable enabled stop alarms while the instance boots and deploys"
+            }
+        }
         exit 0
     }
 
@@ -986,6 +1129,11 @@ try {
 
     $State = [string]$Instance.State.Name
     if ($State -eq "stopped" -or $State -eq "stopping") {
+        if ($EnabledStopAlarmNames.Count -gt 0) {
+            Write-Host "[cloudwatch] Temporarily disabling stop alarm actions: $([string]::Join(', ', $EnabledStopAlarmNames))"
+            Set-CloudWatchAlarmActionsEnabled -AlarmNames $EnabledStopAlarmNames -Region $Region -Enable $false
+            $StopAlarmNamesToReenable = @($EnabledStopAlarmNames)
+        }
         Write-Host "[aws] Starting EC2 instance $InstanceId"
         $null = Invoke-AwsJson -Region $Region -Arguments @(
             "ec2",
@@ -1079,6 +1227,7 @@ try {
             -SshArguments $SshArguments `
             -CommandText (Build-RemoteTunnelCommand -DeployPath $DeployPath -AppPort $AppPort)
     }
+    $Url = Normalize-StartupUrl -Value $Url -Label "Startup URL"
 
     $Summary = Build-StartupSummary `
         -InstanceId $InstanceId `
@@ -1147,4 +1296,20 @@ catch {
     }
 
     exit 1
+}
+finally {
+    if ($StopAlarmNamesToReenable.Count -gt 0) {
+        try {
+            Write-Host "[cloudwatch] Restoring stop alarm actions: $([string]::Join(', ', $StopAlarmNamesToReenable))"
+            Set-CloudWatchAlarmActionsEnabled -AlarmNames $StopAlarmNamesToReenable -Region $Region -Enable $true
+        }
+        catch {
+            $RestoreMessage = $_.Exception.Message
+            if (-not $RestoreMessage) {
+                $RestoreMessage = "Unknown error while restoring CloudWatch alarm actions."
+            }
+            Write-Host "[cloudwatch] Failed to restore stop alarm actions." -ForegroundColor Yellow
+            Write-Host $RestoreMessage -ForegroundColor Yellow
+        }
+    }
 }
