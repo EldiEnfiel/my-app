@@ -16,6 +16,7 @@ const timeSyncButton = document.querySelector("#toggle-time-sync");
 const cloudButton = document.querySelector("#toggle-clouds");
 const flightButton = document.querySelector("#toggle-flights");
 const shipButton = document.querySelector("#toggle-ships");
+const mapStyleButton = document.querySelector("#toggle-map-style");
 const trafficInfoModeButton = document.querySelector("#toggle-traffic-info-mode");
 const resetButton = document.querySelector("#reset-view");
 const syncValue = document.querySelector("#sync-value");
@@ -23,6 +24,7 @@ const clockValue = document.querySelector("#clock-value");
 const flightStatusValue = document.querySelector("#flight-status-value");
 const shipStatusValue = document.querySelector("#ship-status-value");
 const locationLogStatusValue = document.querySelector("#location-log-status-value");
+const mapStyleValue = document.querySelector("#map-style-value");
 const flightTooltip = document.querySelector("#flight-tooltip");
 const locationSearchForm = document.querySelector("#location-search-form");
 const locationSearchInput = document.querySelector("#location-search-input");
@@ -169,6 +171,7 @@ let lastLocationLogStatusText = "Waiting to load";
 let lastLatitudeText = "";
 let lastLongitudeText = "";
 let lastSearchStatusText = "";
+let mapStyleMode = APP_CONFIG.mapStyle.defaultMode;
 let trafficInfoMode = compactTrafficMediaQuery.matches
   ? APP_CONFIG.trafficInfo.mobileDefaultMode
   : APP_CONFIG.trafficInfo.defaultMode;
@@ -191,6 +194,7 @@ clockValue.textContent = "--";
 flightStatusValue.textContent = "表示オフ";
 shipStatusValue.textContent = "表示オフ";
 locationLogStatusValue.textContent = "Waiting to load";
+mapStyleValue.textContent = "地形";
 searchStatusValue.textContent = "日本語でも検索できます。Enter で座標へ移動します。";
 latitudeValue.textContent = "--";
 longitudeValue.textContent = "--";
@@ -270,6 +274,12 @@ shipButton.addEventListener("click", () => {
   shipsVisible = true;
   updateShipToggleUI();
   loadShipSnapshot();
+});
+
+mapStyleButton.addEventListener("click", () => {
+  mapStyleMode = mapStyleMode === "terrain" ? "simplified" : "terrain";
+  updateMapStyleUI();
+  applyMapStyleMode();
 });
 
 trafficInfoModeButton.addEventListener("click", () => {
@@ -373,6 +383,8 @@ async function init() {
   updateClockLabel(activeDate);
   updateFlightToggleUI();
   updateShipToggleUI();
+  updateMapStyleUI();
+  applyMapStyleMode();
   await loadLocationLogMarkers();
   updateTrafficInfoModeUI();
   setSearchStatus(searchStatusValue.textContent);
@@ -537,6 +549,34 @@ function updateShipToggleUI() {
     : shipsVisible
       ? "船舶を非表示"
       : "船舶を表示";
+}
+
+function updateMapStyleUI() {
+  const isSimplified = mapStyleMode === "simplified";
+  mapStyleButton.textContent = isSimplified
+    ? "地形表示に戻す"
+    : "簡略地図を表示";
+  mapStyleValue.textContent = isSimplified ? "簡略地図" : "地形";
+}
+
+function applyMapStyleMode() {
+  if (!earthMaterial) {
+    return;
+  }
+
+  earthMaterial.uniforms.mapModeMix.value =
+    mapStyleMode === "simplified" ? 1 : 0;
+  discardRegionalTexture();
+
+  if (
+    Number.isFinite(currentViewedLatitude) &&
+    Number.isFinite(currentViewedLongitude)
+  ) {
+    updateRegionalTexture(currentViewedLatitude, currentViewedLongitude);
+    earthMaterial.uniforms.hiResMix.value = activeRegionalTexture
+      ? getRegionalTextureStrength()
+      : 0;
+  }
 }
 
 function updateTrafficInfoModeUI() {
@@ -1304,7 +1344,11 @@ function getLocationLogMarkerMaterial() {
   if (!locationLogPointsMaterial) {
     locationLogPointsMaterial = createStaticMarkerMaterial(
       createLocationLogHistoryMarkerTexture(),
-      APP_CONFIG.locationLog.markerMaxSize
+      APP_CONFIG.locationLog.markerMaxSize,
+      {
+        maxScreenSize: APP_CONFIG.locationLog.markerMaxScreenSize,
+        minScreenSize: APP_CONFIG.locationLog.markerMinScreenSize,
+      }
     );
   }
 
@@ -1315,27 +1359,37 @@ function getLocationLogLatestMarkerMaterial() {
   if (!locationLogLatestPointMaterial) {
     locationLogLatestPointMaterial = createStaticMarkerMaterial(
       createLocationLogLatestMarkerTexture(),
-      APP_CONFIG.locationLog.latestMarkerMaxSize
+      APP_CONFIG.locationLog.latestMarkerMaxSize,
+      {
+        maxScreenSize: APP_CONFIG.locationLog.latestMarkerMaxScreenSize,
+        minScreenSize: APP_CONFIG.locationLog.latestMarkerMinScreenSize,
+      }
     );
   }
 
   return locationLogLatestPointMaterial;
 }
 
-function createStaticMarkerMaterial(markerMap, markerSize) {
+function createStaticMarkerMaterial(markerMap, markerSize, options = {}) {
   return new THREE.ShaderMaterial({
     uniforms: {
       markerMap: { value: markerMap },
       markerSize: { value: markerSize },
       pointScale: { value: renderer.getPixelRatio() * window.innerHeight * 0.5 },
+      maxScreenSize: { value: options.maxScreenSize ?? Infinity },
+      minScreenSize: { value: options.minScreenSize ?? 0 },
     },
     vertexShader: `
       uniform float markerSize;
       uniform float pointScale;
+      uniform float maxScreenSize;
+      uniform float minScreenSize;
 
       void main() {
         vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-        gl_PointSize = markerSize * pointScale / max(-mvPosition.z, 0.0001);
+        float screenSize =
+          markerSize * pointScale / max(-mvPosition.z, 0.0001);
+        gl_PointSize = clamp(screenSize, minScreenSize, maxScreenSize);
         gl_Position = projectionMatrix * mvPosition;
       }
     `,
@@ -1355,7 +1409,7 @@ function createStaticMarkerMaterial(markerMap, markerSize) {
       }
     `,
     transparent: true,
-    blending: THREE.AdditiveBlending,
+    blending: THREE.NormalBlending,
     depthWrite: false,
     depthTest: true,
   });
@@ -1370,13 +1424,17 @@ function createLocationLogHistoryMarkerTexture() {
   const context = markerCanvas.getContext("2d");
   context.clearRect(0, 0, size, size);
   context.translate(size / 2, size / 2);
-  context.shadowColor = "rgba(84, 245, 221, 0.7)";
-  context.shadowBlur = 18;
-  context.fillStyle = "rgba(84, 245, 221, 0.96)";
+  context.fillStyle = "rgba(84, 245, 221, 0.58)";
 
   context.beginPath();
-  context.arc(0, 0, 12, 0, Math.PI * 2);
+  context.arc(0, 0, 9, 0, Math.PI * 2);
   context.fill();
+
+  context.lineWidth = 2;
+  context.strokeStyle = "rgba(202, 255, 246, 0.7)";
+  context.beginPath();
+  context.arc(0, 0, 12.5, 0, Math.PI * 2);
+  context.stroke();
 
   const texture = new THREE.CanvasTexture(markerCanvas);
   texture.colorSpace = THREE.SRGBColorSpace;
@@ -1385,7 +1443,7 @@ function createLocationLogHistoryMarkerTexture() {
 }
 
 function createLocationLogLatestMarkerTexture() {
-  const size = 160;
+  const size = 128;
   const markerCanvas = document.createElement("canvas");
   markerCanvas.width = size;
   markerCanvas.height = size;
@@ -1393,26 +1451,34 @@ function createLocationLogLatestMarkerTexture() {
   const context = markerCanvas.getContext("2d");
   context.clearRect(0, 0, size, size);
   context.translate(size / 2, size / 2);
+  context.shadowColor = "rgba(112, 255, 231, 0.28)";
+  context.shadowBlur = 12;
 
-  const halo = context.createRadialGradient(0, 0, 8, 0, 0, 62);
-  halo.addColorStop(0, "rgba(255, 255, 255, 0.98)");
-  halo.addColorStop(0.2, "rgba(84, 245, 221, 0.98)");
-  halo.addColorStop(0.55, "rgba(84, 245, 221, 0.32)");
+  const halo = context.createRadialGradient(0, 0, 6, 0, 0, 44);
+  halo.addColorStop(0, "rgba(186, 255, 244, 0.48)");
+  halo.addColorStop(0.35, "rgba(84, 245, 221, 0.2)");
   halo.addColorStop(1, "rgba(84, 245, 221, 0)");
   context.fillStyle = halo;
   context.beginPath();
-  context.arc(0, 0, 62, 0, Math.PI * 2);
+  context.arc(0, 0, 44, 0, Math.PI * 2);
   context.fill();
 
-  context.strokeStyle = "rgba(230, 255, 250, 0.98)";
-  context.lineWidth = 10;
+  context.shadowBlur = 0;
+  context.strokeStyle = "rgba(234, 255, 251, 0.92)";
+  context.lineWidth = 6;
   context.beginPath();
-  context.arc(0, 0, 42, 0, Math.PI * 2);
+  context.arc(0, 0, 28, 0, Math.PI * 2);
   context.stroke();
 
-  context.fillStyle = "rgba(255, 255, 255, 0.98)";
+  context.strokeStyle = "rgba(112, 255, 231, 0.85)";
+  context.lineWidth = 2.5;
   context.beginPath();
-  context.arc(0, 0, 14, 0, Math.PI * 2);
+  context.arc(0, 0, 17, 0, Math.PI * 2);
+  context.stroke();
+
+  context.fillStyle = "rgba(244, 255, 252, 0.96)";
+  context.beginPath();
+  context.arc(0, 0, 6, 0, Math.PI * 2);
   context.fill();
 
   const texture = new THREE.CanvasTexture(markerCanvas);
@@ -2107,8 +2173,16 @@ function getRegionalTextureStrength() {
   );
 }
 
+function getCurrentRegionalTextureStyle() {
+  return (
+    APP_CONFIG.regionalTexture.styles[mapStyleMode] ??
+    APP_CONFIG.regionalTexture.styles.terrain
+  );
+}
+
 function updateRegionalTexture(latitude, longitude) {
   const hiResStrength = getRegionalTextureStrength();
+  const regionalStyle = getCurrentRegionalTextureStyle();
 
   if (hiResStrength <= 0) {
     discardRegionalTexture();
@@ -2123,7 +2197,12 @@ function updateRegionalTexture(latitude, longitude) {
     return;
   }
 
-  const requestBounds = buildRegionalBounds(latitude, longitude, hiResStrength);
+  const requestBounds = buildRegionalBounds(
+    latitude,
+    longitude,
+    hiResStrength,
+    regionalStyle
+  );
 
   if (!requestBounds) {
     discardRegionalTexture();
@@ -2144,9 +2223,10 @@ function updateRegionalTexture(latitude, longitude) {
   const requestId = regionalRequestId;
   disposeActiveRegionalTexture();
   earthMaterial.uniforms.hiResMix.value = 0;
+  earthMaterial.uniforms.hiResOpacity.value = 0;
 
   regionalTextureLoader.load(
-    buildRegionalTextureUrl(requestBounds),
+    buildRegionalTextureUrl(requestBounds, regionalStyle),
     (texture) => {
       if (
         requestId !== regionalRequestId ||
@@ -2174,6 +2254,7 @@ function updateRegionalTexture(latitude, longitude) {
         requestBounds.east,
         requestBounds.north
       );
+      earthMaterial.uniforms.hiResOpacity.value = regionalStyle.opacity;
       earthMaterial.uniforms.hiResMix.value = getRegionalTextureStrength();
     },
     undefined,
@@ -2194,6 +2275,7 @@ function discardRegionalTexture() {
 
   if (earthMaterial) {
     earthMaterial.uniforms.hiResMix.value = 0;
+    earthMaterial.uniforms.hiResOpacity.value = 0;
   }
 }
 
@@ -2210,9 +2292,10 @@ function disposeActiveRegionalTexture() {
   activeRegionalBounds = null;
   earthMaterial.uniforms.hiResMap.value = dayTexture;
   earthMaterial.uniforms.hiResBounds.value.set(-180, -90, 180, 90);
+  earthMaterial.uniforms.hiResOpacity.value = 0;
 }
 
-function buildRegionalBounds(latitude, longitude, hiResStrength) {
+function buildRegionalBounds(latitude, longitude, hiResStrength, regionalStyle) {
   const latRadius = THREE.MathUtils.lerp(
     APP_CONFIG.regionalTexture.maxRadius,
     APP_CONFIG.regionalTexture.minRadius,
@@ -2258,26 +2341,31 @@ function buildRegionalBounds(latitude, longitude, hiResStrength) {
     south,
     east,
     north,
-    key: [centerLatitude, centerLongitude, latRadius, lonRadius]
-      .map((value) => value.toFixed(2))
+    styleKey: regionalStyle.layer,
+    key: [regionalStyle.layer, centerLatitude, centerLongitude, latRadius, lonRadius]
+      .map((value) =>
+        typeof value === "number" ? value.toFixed(2) : String(value)
+      )
       .join(":"),
   };
 }
 
-function buildRegionalTextureUrl(bounds) {
+function buildRegionalTextureUrl(bounds, regionalStyle) {
   const params = new URLSearchParams({
     SERVICE: "WMS",
     REQUEST: "GetMap",
     VERSION: "1.1.1",
     SRS: "EPSG:4326",
-    LAYERS: APP_CONFIG.regionalTexture.layer,
+    LAYERS: regionalStyle.layer,
+    STYLES: "",
     BBOX: `${bounds.west},${bounds.south},${bounds.east},${bounds.north}`,
     WIDTH: String(APP_CONFIG.regionalTexture.requestSize),
     HEIGHT: String(APP_CONFIG.regionalTexture.requestSize),
-    FORMAT: "image/jpeg",
+    FORMAT: regionalStyle.format,
+    TRANSPARENT: regionalStyle.transparent ? "TRUE" : "FALSE",
   });
 
-  return `https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?${params.toString()}`;
+  return `${regionalStyle.url}?${params.toString()}`;
 }
 
 function isWithinRegionalBounds(latitude, longitude, bounds, marginRatio = 0) {
@@ -2354,9 +2442,13 @@ function exposeDebugBridge() {
         hiResMix: earthMaterial
           ? Number(earthMaterial.uniforms.hiResMix.value.toFixed(4))
           : 0,
+        hiResOpacity: earthMaterial
+          ? Number(earthMaterial.uniforms.hiResOpacity.value.toFixed(4))
+          : 0,
         hasRegionalTexture: Boolean(activeRegionalTexture),
         activeRegionalKey: activeRegionalBounds?.key ?? null,
         pendingRegionalKey: pendingRegionalKey || null,
+        mapStyleMode,
         cameraMoveActive: Boolean(cameraMoveAnimation),
         flightsVisible,
         flightStatus: lastFlightStatusText,

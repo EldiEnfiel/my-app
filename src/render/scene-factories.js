@@ -65,6 +65,8 @@ export function createEarthMaterial(dayMap, lightsMap, reliefMap) {
       },
       detailStrength: { value: 0 },
       hiResMix: { value: 0 },
+      hiResOpacity: { value: 0 },
+      mapModeMix: { value: 0 },
     },
     vertexShader: `
       varying vec2 vUv;
@@ -87,6 +89,8 @@ export function createEarthMaterial(dayMap, lightsMap, reliefMap) {
       uniform vec2 texelSize;
       uniform float detailStrength;
       uniform float hiResMix;
+      uniform float hiResOpacity;
+      uniform float mapModeMix;
 
       varying vec2 vUv;
       varying vec3 vWorldNormal;
@@ -110,26 +114,7 @@ export function createEarthMaterial(dayMap, lightsMap, reliefMap) {
           min(hiResUv.y, 1.0 - hiResUv.y)
         );
 
-        return hiResInside * smoothstep(0.015, 0.09, hiResEdge) * hiResMix;
-      }
-
-      vec3 sampleSurfaceColor(vec2 sampleUv) {
-        vec2 uv = vec2(fract(sampleUv.x), clamp(sampleUv.y, 0.001, 0.999));
-        float latitude = uv.y * 180.0 - 90.0;
-        float longitude = uv.x * 360.0 - 180.0;
-        vec3 baseAlbedo = texture2D(dayMap, uv).rgb;
-        float hiResWidth = max(hiResBounds.z - hiResBounds.x, 0.0001);
-        float hiResHeight = max(hiResBounds.w - hiResBounds.y, 0.0001);
-        vec2 hiResUv = vec2(
-          (longitude - hiResBounds.x) / hiResWidth,
-          (latitude - hiResBounds.y) / hiResHeight
-        );
-        vec3 hiResAlbedo = texture2D(
-          hiResMap,
-          clamp(hiResUv, vec2(0.001), vec2(0.999))
-        ).rgb;
-
-        return mix(baseAlbedo, hiResAlbedo, getHiResMask(uv));
+        return hiResInside * smoothstep(0.03, 0.18, hiResEdge) * hiResMix;
       }
 
       float getOceanMask(vec3 sampleColor) {
@@ -144,6 +129,58 @@ export function createEarthMaterial(dayMap, lightsMap, reliefMap) {
           warmWeight * 0.1;
 
         return smoothstep(-0.05, 0.16, oceanSignal);
+      }
+
+      vec3 getSimplifiedMapColor(vec2 uv, vec3 baseAlbedo) {
+        float latitudeRatio = abs(uv.y * 2.0 - 1.0);
+        float oceanMask = getOceanMask(baseAlbedo);
+        vec3 reliefSample = texture2D(reliefMap, uv).rgb;
+        float elevation = dot(reliefSample, vec3(0.2, 0.55, 0.25));
+        float dryness = smoothstep(0.12, 0.38, baseAlbedo.r - baseAlbedo.g * 0.78);
+        float lushness = smoothstep(0.1, 0.32, baseAlbedo.g - baseAlbedo.r * 0.65);
+        vec3 landLow = vec3(0.32, 0.39, 0.29);
+        vec3 landHigh = vec3(0.61, 0.58, 0.45);
+        vec3 lushTint = vec3(0.25, 0.38, 0.24);
+        vec3 aridTint = vec3(0.67, 0.58, 0.39);
+        vec3 polarTint = vec3(0.78, 0.81, 0.82);
+        vec3 oceanDeep = vec3(0.13, 0.24, 0.34);
+        vec3 oceanShallow = vec3(0.34, 0.46, 0.57);
+        vec3 land = mix(landLow, landHigh, smoothstep(0.16, 0.82, elevation));
+        land = mix(land, lushTint, lushness * 0.32);
+        land = mix(land, aridTint, dryness * 0.42);
+        land = mix(land, polarTint, smoothstep(0.72, 0.96, latitudeRatio) * 0.58);
+        vec3 ocean = mix(
+          oceanDeep,
+          oceanShallow,
+          smoothstep(0.18, 0.58, baseAlbedo.g + baseAlbedo.b)
+        );
+
+        return mix(land, ocean, oceanMask);
+      }
+
+      vec3 sampleSurfaceColor(vec2 sampleUv) {
+        vec2 uv = vec2(fract(sampleUv.x), clamp(sampleUv.y, 0.001, 0.999));
+        float latitude = uv.y * 180.0 - 90.0;
+        float longitude = uv.x * 360.0 - 180.0;
+        vec3 baseAlbedo = texture2D(dayMap, uv).rgb;
+        baseAlbedo = mix(
+          baseAlbedo,
+          getSimplifiedMapColor(uv, baseAlbedo),
+          mapModeMix
+        );
+        float hiResWidth = max(hiResBounds.z - hiResBounds.x, 0.0001);
+        float hiResHeight = max(hiResBounds.w - hiResBounds.y, 0.0001);
+        vec2 hiResUv = vec2(
+          (longitude - hiResBounds.x) / hiResWidth,
+          (latitude - hiResBounds.y) / hiResHeight
+        );
+        vec4 hiResSample = texture2D(
+          hiResMap,
+          clamp(hiResUv, vec2(0.001), vec2(0.999))
+        );
+        float hiResAlpha = hiResOpacity * hiResSample.a * getHiResMask(uv);
+
+        return mix(baseAlbedo, hiResSample.rgb, hiResAlpha);
       }
 
       void main() {

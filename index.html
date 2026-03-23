@@ -35,6 +35,7 @@
             <button id="toggle-clouds" type="button">雲を非表示</button>
             <button id="toggle-flights" type="button">航空機を表示</button>
             <button id="toggle-ships" type="button">船舶を表示</button>
+            <button id="toggle-map-style" type="button">簡略地図を表示</button>
             <button id="reset-view" type="button">視点を戻す</button>
           </div>
         </section>
@@ -42,7 +43,7 @@
         <section class="panel panel-controls">
           <div class="metric metric-search">
             <div class="metric-header">
-              <span class="metric-label">場所検索</span>
+              <span class="metric-label">場所を検索</span>
               <button id="toggle-traffic-info-mode" type="button" class="mini-button">
                 情報表示: 詳細
               </button>
@@ -51,14 +52,14 @@
               <input
                 id="location-search-input"
                 type="search"
-                placeholder="地域名・建物名・座標を検索"
+                placeholder="地名・施設名・座標を検索"
                 autocomplete="off"
                 enterkeyhint="search"
               />
               <button id="location-search-submit" type="submit">移動</button>
             </form>
             <span id="search-status-value" class="metric-value">
-              日本語でも検索できます。Enter で座標へ移動します。
+              日本語でも検索できます。Enter で最上位候補へ移動します。
             </span>
             <div id="search-results" class="search-results" hidden></div>
             <span class="search-attribution">
@@ -67,7 +68,9 @@
           </div>
           <div class="metric">
             <span class="metric-label">操作</span>
-            <span class="metric-value">ドラッグで回転 / ホイールでズーム / 最大ズーム付近は中心周辺だけ高精細表示</span>
+            <span class="metric-value">
+              ドラッグで回転 / ホイールでズーム / 最大ズーム時は拡大地域の詳細地図を表示
+            </span>
           </div>
           <div class="metric">
             <span class="metric-label">時刻同期</span>
@@ -90,7 +93,14 @@
             <span id="location-log-status-value" class="metric-value">Waiting to load</span>
           </div>
           <div class="metric">
-            <span class="metric-label">画面中央地点</span>
+            <span class="metric-label">地表表示</span>
+            <span id="map-style-value" class="metric-value">地形</span>
+            <span class="metric-subvalue">
+              Map detail data © OpenStreetMap contributors, terrestris
+            </span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">画面中央の地点</span>
             <div class="coords-grid">
               <div class="coord-card">
                 <span class="coord-key">緯度</span>

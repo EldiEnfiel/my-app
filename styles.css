@@ -235,6 +235,12 @@ button:disabled {
   line-height: 1.6;
 }
 
+.metric-subvalue {
+  color: rgba(224, 235, 255, 0.5);
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
 .mini-button {
   min-height: 36px;
   padding: 7px 12px;
