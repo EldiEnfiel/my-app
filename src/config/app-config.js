@@ -60,10 +60,10 @@ export const APP_CONFIG = {
     latestMarkerMaxScreenSize: 46,
     trailRadius: 1.024,
     trailOpacity: 0.42,
-    focusPaddingDegrees: 2.6,
-    focusMinDistance: 1.05,
+    focusPaddingDegrees: 0.45,
+    focusMinDistance: 1.04,
     focusMaxDistance: 2.5,
-    focusSingleDistance: 1.1,
+    focusSingleDistance: 1.06,
     focusDurationMs: 1450,
   },
   mapStyle: {
