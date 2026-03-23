@@ -49,9 +49,11 @@ export const APP_CONFIG = {
   },
   locationLog: {
     snapshotUrl: "/api/mylocations",
-    markerBaseRadius: 1.01,
-    markerMinSize: 0.01,
-    markerMaxSize: 0.018,
+    markerBaseRadius: 1.032,
+    markerMinSize: 0.024,
+    markerMaxSize: 0.05,
+    latestMarkerMinSize: 0.085,
+    latestMarkerMaxSize: 0.14,
   },
   trafficInfo: {
     compactBreakpoint: 760,

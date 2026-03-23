@@ -145,6 +145,8 @@ let shipPointsMaterial;
 let locationLogLayer;
 let locationLogPoints;
 let locationLogPointsMaterial;
+let locationLogLatestPoint;
+let locationLogLatestPointMaterial;
 let activeRegionalTexture = null;
 let activeRegionalBounds = null;
 let currentViewedLatitude = null;
@@ -890,6 +892,17 @@ async function loadLocationLogMarkers() {
         ? `${markerCount} markers / latest ${latestRecord.dateText}${suffix}`
         : `${markerCount} markers${suffix}`
     );
+
+    if (
+      latestRecord &&
+      Number.isFinite(latestRecord.latitude) &&
+      Number.isFinite(latestRecord.longitude)
+    ) {
+      moveCameraToLocation(latestRecord.latitude, latestRecord.longitude, {
+        distance: APP_CONFIG.search.focusDistance,
+        durationMs: 1200,
+      });
+    }
   } catch (error) {
     console.error(error);
     clearLocationLogMarkers();
@@ -1182,9 +1195,11 @@ function populateLocationLogMarkers(records) {
     return 0;
   }
 
-  const positions = new Float32Array(visibleRecords.length * 3);
+  const historyRecords = visibleRecords.slice(0, -1);
+  const latestRecord = visibleRecords[visibleRecords.length - 1];
+  const historyPositions = new Float32Array(historyRecords.length * 3);
 
-  visibleRecords.forEach((record, index) => {
+  historyRecords.forEach((record, index) => {
     latLonToSurfaceVector(
       record.latitude,
       record.longitude,
@@ -1192,33 +1207,75 @@ function populateLocationLogMarkers(records) {
     ).multiplyScalar(APP_CONFIG.locationLog.markerBaseRadius);
 
     const positionIndex = index * 3;
-    positions[positionIndex] = flightMarkerVector.x;
-    positions[positionIndex + 1] = flightMarkerVector.y;
-    positions[positionIndex + 2] = flightMarkerVector.z;
+    historyPositions[positionIndex] = flightMarkerVector.x;
+    historyPositions[positionIndex + 1] = flightMarkerVector.y;
+    historyPositions[positionIndex + 2] = flightMarkerVector.z;
   });
-
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-  geometry.computeBoundingSphere();
 
   clearLocationLogMarkers();
 
-  locationLogPoints = new THREE.Points(geometry, getLocationLogMarkerMaterial());
-  locationLogPoints.userData.records = visibleRecords;
-  locationLogLayer.add(locationLogPoints);
+  if (historyRecords.length > 0) {
+    const historyGeometry = new THREE.BufferGeometry();
+    historyGeometry.setAttribute(
+      "position",
+      new THREE.BufferAttribute(historyPositions, 3)
+    );
+    historyGeometry.computeBoundingSphere();
+
+    locationLogPoints = new THREE.Points(
+      historyGeometry,
+      getLocationLogMarkerMaterial()
+    );
+    locationLogPoints.userData.records = historyRecords;
+    locationLogLayer.add(locationLogPoints);
+  }
+
+  if (latestRecord) {
+    latLonToSurfaceVector(
+      latestRecord.latitude,
+      latestRecord.longitude,
+      flightMarkerVector
+    ).multiplyScalar(APP_CONFIG.locationLog.markerBaseRadius);
+
+    const latestGeometry = new THREE.BufferGeometry();
+    latestGeometry.setAttribute(
+      "position",
+      new THREE.BufferAttribute(
+        new Float32Array([
+          flightMarkerVector.x,
+          flightMarkerVector.y,
+          flightMarkerVector.z,
+        ]),
+        3
+      )
+    );
+    latestGeometry.computeBoundingSphere();
+
+    locationLogLatestPoint = new THREE.Points(
+      latestGeometry,
+      getLocationLogLatestMarkerMaterial()
+    );
+    locationLogLatestPoint.userData.record = latestRecord;
+    locationLogLayer.add(locationLogLatestPoint);
+  }
+
   updateTrafficMarkerScale();
 
   return visibleRecords.length;
 }
 
 function clearLocationLogMarkers() {
-  if (!locationLogPoints || !locationLogLayer) {
-    return;
+  if (locationLogPoints && locationLogLayer) {
+    locationLogLayer.remove(locationLogPoints);
+    locationLogPoints.geometry.dispose();
+    locationLogPoints = null;
   }
 
-  locationLogLayer.remove(locationLogPoints);
-  locationLogPoints.geometry.dispose();
-  locationLogPoints = null;
+  if (locationLogLatestPoint && locationLogLayer) {
+    locationLogLayer.remove(locationLogLatestPoint);
+    locationLogLatestPoint.geometry.dispose();
+    locationLogLatestPoint = null;
+  }
 }
 
 function getFlightMarkerMaterial() {
@@ -1246,12 +1303,23 @@ function getShipMarkerMaterial() {
 function getLocationLogMarkerMaterial() {
   if (!locationLogPointsMaterial) {
     locationLogPointsMaterial = createStaticMarkerMaterial(
-      createLocationLogMarkerTexture(),
+      createLocationLogHistoryMarkerTexture(),
       APP_CONFIG.locationLog.markerMaxSize
     );
   }
 
   return locationLogPointsMaterial;
+}
+
+function getLocationLogLatestMarkerMaterial() {
+  if (!locationLogLatestPointMaterial) {
+    locationLogLatestPointMaterial = createStaticMarkerMaterial(
+      createLocationLogLatestMarkerTexture(),
+      APP_CONFIG.locationLog.latestMarkerMaxSize
+    );
+  }
+
+  return locationLogLatestPointMaterial;
 }
 
 function createStaticMarkerMaterial(markerMap, markerSize) {
@@ -1287,12 +1355,13 @@ function createStaticMarkerMaterial(markerMap, markerSize) {
       }
     `,
     transparent: true,
+    blending: THREE.AdditiveBlending,
     depthWrite: false,
     depthTest: true,
   });
 }
 
-function createLocationLogMarkerTexture() {
+function createLocationLogHistoryMarkerTexture() {
   const size = 96;
   const markerCanvas = document.createElement("canvas");
   markerCanvas.width = size;
@@ -1301,19 +1370,50 @@ function createLocationLogMarkerTexture() {
   const context = markerCanvas.getContext("2d");
   context.clearRect(0, 0, size, size);
   context.translate(size / 2, size / 2);
-  context.shadowColor = "rgba(255, 203, 107, 0.5)";
+  context.shadowColor = "rgba(84, 245, 221, 0.7)";
   context.shadowBlur = 18;
-  context.fillStyle = "rgba(255, 203, 107, 0.95)";
-  context.strokeStyle = "rgba(255, 247, 214, 0.98)";
-  context.lineWidth = 6;
+  context.fillStyle = "rgba(84, 245, 221, 0.96)";
 
   context.beginPath();
-  context.arc(0, 0, 18, 0, Math.PI * 2);
+  context.arc(0, 0, 12, 0, Math.PI * 2);
   context.fill();
 
+  const texture = new THREE.CanvasTexture(markerCanvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+function createLocationLogLatestMarkerTexture() {
+  const size = 160;
+  const markerCanvas = document.createElement("canvas");
+  markerCanvas.width = size;
+  markerCanvas.height = size;
+
+  const context = markerCanvas.getContext("2d");
+  context.clearRect(0, 0, size, size);
+  context.translate(size / 2, size / 2);
+
+  const halo = context.createRadialGradient(0, 0, 8, 0, 0, 62);
+  halo.addColorStop(0, "rgba(255, 255, 255, 0.98)");
+  halo.addColorStop(0.2, "rgba(84, 245, 221, 0.98)");
+  halo.addColorStop(0.55, "rgba(84, 245, 221, 0.32)");
+  halo.addColorStop(1, "rgba(84, 245, 221, 0)");
+  context.fillStyle = halo;
   context.beginPath();
-  context.arc(0, 0, 30, 0, Math.PI * 2);
+  context.arc(0, 0, 62, 0, Math.PI * 2);
+  context.fill();
+
+  context.strokeStyle = "rgba(230, 255, 250, 0.98)";
+  context.lineWidth = 10;
+  context.beginPath();
+  context.arc(0, 0, 42, 0, Math.PI * 2);
   context.stroke();
+
+  context.fillStyle = "rgba(255, 255, 255, 0.98)";
+  context.beginPath();
+  context.arc(0, 0, 14, 0, Math.PI * 2);
+  context.fill();
 
   const texture = new THREE.CanvasTexture(markerCanvas);
   texture.colorSpace = THREE.SRGBColorSpace;
@@ -1639,6 +1739,12 @@ function updateTrafficMarkerScale() {
     locationLogPointsMaterial,
     APP_CONFIG.locationLog.markerMinSize,
     APP_CONFIG.locationLog.markerMaxSize,
+    distanceFactor
+  );
+  updateDirectionalMarkerScale(
+    locationLogLatestPointMaterial,
+    APP_CONFIG.locationLog.latestMarkerMinSize,
+    APP_CONFIG.locationLog.latestMarkerMaxSize,
     distanceFactor
   );
 }
@@ -2257,7 +2363,8 @@ function exposeDebugBridge() {
         flightMarkers: flightPoints?.geometry?.attributes?.position?.count ?? 0,
         shipMarkers: shipPoints?.geometry?.attributes?.position?.count ?? 0,
         locationLogMarkers:
-          locationLogPoints?.geometry?.attributes?.position?.count ?? 0,
+          (locationLogPoints?.geometry?.attributes?.position?.count ?? 0) +
+          (locationLogLatestPoint?.geometry?.attributes?.position?.count ?? 0),
         locationLogStatus: lastLocationLogStatusText,
         latitude: currentViewedLatitude,
         longitude: currentViewedLongitude,
