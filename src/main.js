@@ -103,6 +103,8 @@ const cameraMoveQuaternion = new THREE.Quaternion();
 const identityQuaternion = new THREE.Quaternion();
 const viewedLocalPoint = new THREE.Vector3();
 const viewedWorldPoint = new THREE.Vector3();
+const locationLogFocusVector = new THREE.Vector3();
+const locationLogAggregateVector = new THREE.Vector3();
 const debugEnabled = new URLSearchParams(window.location.search).has("debug");
 const compactTrafficMediaQuery = window.matchMedia(
   `(max-width: ${APP_CONFIG.trafficInfo.compactBreakpoint}px)`
@@ -145,6 +147,8 @@ let shipLayer;
 let shipPoints;
 let shipPointsMaterial;
 let locationLogLayer;
+let locationLogTrailLine;
+let locationLogTrailMaterial;
 let locationLogPoints;
 let locationLogPointsMaterial;
 let locationLogLatestPoint;
@@ -933,16 +937,7 @@ async function loadLocationLogMarkers() {
         : `${markerCount} markers${suffix}`
     );
 
-    if (
-      latestRecord &&
-      Number.isFinite(latestRecord.latitude) &&
-      Number.isFinite(latestRecord.longitude)
-    ) {
-      moveCameraToLocation(latestRecord.latitude, latestRecord.longitude, {
-        distance: APP_CONFIG.search.focusDistance,
-        durationMs: 1200,
-      });
-    }
+    focusCameraOnLocationLogRecords(records);
   } catch (error) {
     console.error(error);
     clearLocationLogMarkers();
@@ -1238,6 +1233,7 @@ function populateLocationLogMarkers(records) {
   const historyRecords = visibleRecords.slice(0, -1);
   const latestRecord = visibleRecords[visibleRecords.length - 1];
   const historyPositions = new Float32Array(historyRecords.length * 3);
+  const trailPositions = new Float32Array(visibleRecords.length * 3);
 
   historyRecords.forEach((record, index) => {
     latLonToSurfaceVector(
@@ -1252,7 +1248,35 @@ function populateLocationLogMarkers(records) {
     historyPositions[positionIndex + 2] = flightMarkerVector.z;
   });
 
+  visibleRecords.forEach((record, index) => {
+    latLonToSurfaceVector(
+      record.latitude,
+      record.longitude,
+      flightMarkerVector
+    ).multiplyScalar(APP_CONFIG.locationLog.trailRadius);
+
+    const positionIndex = index * 3;
+    trailPositions[positionIndex] = flightMarkerVector.x;
+    trailPositions[positionIndex + 1] = flightMarkerVector.y;
+    trailPositions[positionIndex + 2] = flightMarkerVector.z;
+  });
+
   clearLocationLogMarkers();
+
+  if (visibleRecords.length > 1) {
+    const trailGeometry = new THREE.BufferGeometry();
+    trailGeometry.setAttribute(
+      "position",
+      new THREE.BufferAttribute(trailPositions, 3)
+    );
+    trailGeometry.computeBoundingSphere();
+
+    locationLogTrailLine = new THREE.Line(
+      trailGeometry,
+      getLocationLogTrailMaterial()
+    );
+    locationLogLayer.add(locationLogTrailLine);
+  }
 
   if (historyRecords.length > 0) {
     const historyGeometry = new THREE.BufferGeometry();
@@ -1305,6 +1329,12 @@ function populateLocationLogMarkers(records) {
 }
 
 function clearLocationLogMarkers() {
+  if (locationLogTrailLine && locationLogLayer) {
+    locationLogLayer.remove(locationLogTrailLine);
+    locationLogTrailLine.geometry.dispose();
+    locationLogTrailLine = null;
+  }
+
   if (locationLogPoints && locationLogLayer) {
     locationLogLayer.remove(locationLogPoints);
     locationLogPoints.geometry.dispose();
@@ -1316,6 +1346,19 @@ function clearLocationLogMarkers() {
     locationLogLatestPoint.geometry.dispose();
     locationLogLatestPoint = null;
   }
+}
+
+function getLocationLogTrailMaterial() {
+  if (!locationLogTrailMaterial) {
+    locationLogTrailMaterial = new THREE.LineBasicMaterial({
+      color: 0x82f4e1,
+      depthWrite: false,
+      transparent: true,
+      opacity: APP_CONFIG.locationLog.trailOpacity,
+    });
+  }
+
+  return locationLogTrailMaterial;
 }
 
 function getFlightMarkerMaterial() {
@@ -2002,6 +2045,89 @@ function clearSearchResults() {
   searchResults.innerHTML = "";
 }
 
+function focusCameraOnLocationLogRecords(records) {
+  const visibleRecords = Array.isArray(records)
+    ? records.filter(
+        (record) =>
+          Number.isFinite(record?.latitude) && Number.isFinite(record?.longitude)
+      )
+    : [];
+
+  if (visibleRecords.length <= 0) {
+    return;
+  }
+
+  const latestRecord = visibleRecords[visibleRecords.length - 1];
+  if (visibleRecords.length === 1) {
+    moveCameraToLocation(latestRecord.latitude, latestRecord.longitude, {
+      distance: APP_CONFIG.locationLog.focusSingleDistance,
+      durationMs: APP_CONFIG.locationLog.focusDurationMs,
+    });
+    return;
+  }
+
+  locationLogAggregateVector.set(0, 0, 0);
+
+  visibleRecords.forEach((record) => {
+    latLonToSurfaceVector(
+      record.latitude,
+      record.longitude,
+      locationLogFocusVector
+    );
+    locationLogAggregateVector.add(locationLogFocusVector);
+  });
+
+  if (locationLogAggregateVector.lengthSq() <= 0.000001) {
+    moveCameraToLocation(latestRecord.latitude, latestRecord.longitude, {
+      distance: APP_CONFIG.locationLog.focusSingleDistance,
+      durationMs: APP_CONFIG.locationLog.focusDurationMs,
+    });
+    return;
+  }
+
+  locationLogAggregateVector.normalize();
+
+  let maxAngularDistance = 0;
+  visibleRecords.forEach((record) => {
+    latLonToSurfaceVector(
+      record.latitude,
+      record.longitude,
+      locationLogFocusVector
+    );
+    maxAngularDistance = Math.max(
+      maxAngularDistance,
+      locationLogAggregateVector.angleTo(locationLogFocusVector)
+    );
+  });
+
+  const verticalHalfFov = THREE.MathUtils.degToRad(camera.fov * 0.5);
+  const horizontalHalfFov = Math.atan(
+    Math.tan(verticalHalfFov) * camera.aspect
+  );
+  const usableHalfFov = Math.min(verticalHalfFov, horizontalHalfFov) * 0.78;
+  const paddedAngularDistance = Math.min(
+    maxAngularDistance +
+      THREE.MathUtils.degToRad(APP_CONFIG.locationLog.focusPaddingDegrees),
+    usableHalfFov * 0.94
+  );
+  const requiredDistance =
+    paddedAngularDistance > 0.0001
+      ? Math.cos(paddedAngularDistance) +
+        Math.sin(paddedAngularDistance) / Math.tan(usableHalfFov)
+      : APP_CONFIG.locationLog.focusSingleDistance;
+  const targetDistance = THREE.MathUtils.clamp(
+    requiredDistance,
+    Math.max(APP_CONFIG.locationLog.focusMinDistance, controls.minDistance),
+    APP_CONFIG.locationLog.focusMaxDistance
+  );
+  const targetCoordinates = surfaceVectorToLatLon(locationLogAggregateVector);
+
+  moveCameraToLocation(targetCoordinates.latitude, targetCoordinates.longitude, {
+    distance: targetDistance,
+    durationMs: APP_CONFIG.locationLog.focusDurationMs,
+  });
+}
+
 function moveCameraToLocation(latitude, longitude, options = {}) {
   clearControlMotion();
 
@@ -2038,6 +2164,19 @@ function moveCameraToLocation(latitude, longitude, options = {}) {
   selectedTrafficInfo = null;
   hoveredTrafficInfo = null;
   hideFlightTooltip();
+}
+
+function surfaceVectorToLatLon(vector) {
+  const normalizedVector = vector.clone().normalize();
+
+  return {
+    latitude: THREE.MathUtils.radToDeg(Math.asin(normalizedVector.y)),
+    longitude: normalizeLongitude(
+      THREE.MathUtils.radToDeg(
+        Math.atan2(-normalizedVector.z, normalizedVector.x)
+      )
+    ),
+  };
 }
 
 function updateCameraMoveAnimation() {
@@ -2307,11 +2446,11 @@ function buildRegionalBounds(latitude, longitude, hiResStrength, regionalStyle) 
   );
   const latitudeStep = Math.max(
     latRadius * APP_CONFIG.regionalTexture.snapRatio,
-    0.35
+    APP_CONFIG.regionalTexture.minSnapStep
   );
   const longitudeStep = Math.max(
     lonRadius * APP_CONFIG.regionalTexture.snapRatio,
-    0.35
+    APP_CONFIG.regionalTexture.minSnapStep
   );
   const centerLatitude = THREE.MathUtils.clamp(
     Math.round(latitude / latitudeStep) * latitudeStep,
@@ -2328,7 +2467,10 @@ function buildRegionalBounds(latitude, longitude, hiResStrength, regionalStyle) 
   const west = centerLongitude - lonRadius;
   const east = centerLongitude + lonRadius;
 
-  if (east - west < 1 || north - south < 1) {
+  if (
+    east - west < APP_CONFIG.regionalTexture.minSpan ||
+    north - south < APP_CONFIG.regionalTexture.minSpan
+  ) {
     return null;
   }
 
