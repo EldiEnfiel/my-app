@@ -424,12 +424,19 @@ function updateControlSensitivity() {
   const rampRatio = smooth01(
     (distance - controls.minDistance) / rampSpan
   );
+  const rotateRampRatio = Math.pow(
+    rampRatio,
+    APP_CONFIG.controls.rotatePrecisionExponent
+  );
+  const inputRotateFactor = getInputRotateFactor(rampRatio);
+  const viewportRotateFactor = getViewportRotateFactor();
 
   controls.rotateSpeed = THREE.MathUtils.lerp(
     APP_CONFIG.controls.closeRotateSpeed,
     APP_CONFIG.controls.rotateSpeed,
-    rampRatio
+    rotateRampRatio
   );
+  controls.rotateSpeed *= inputRotateFactor * viewportRotateFactor;
   controls.zoomSpeed = THREE.MathUtils.lerp(
     APP_CONFIG.controls.closeZoomSpeed,
     APP_CONFIG.controls.zoomSpeed,
@@ -450,6 +457,37 @@ function updateControlSensitivity() {
     camera.fov = targetFov;
     camera.updateProjectionMatrix();
   }
+}
+
+function getInputRotateFactor(rampRatio) {
+  if (activePointerType === "touch") {
+    return THREE.MathUtils.lerp(
+      APP_CONFIG.controls.closeTouchRotateFactor,
+      APP_CONFIG.controls.touchRotateFactor,
+      rampRatio
+    );
+  }
+
+  if (activePointerType === "pen") {
+    return APP_CONFIG.controls.penRotateFactor;
+  }
+
+  return 1;
+}
+
+function getViewportRotateFactor() {
+  if (activePointerType !== "touch") {
+    return 1;
+  }
+
+  const referenceHeight = Math.max(APP_CONFIG.controls.touchReferenceHeight, 1);
+  const viewportHeight = Math.max(canvas.clientHeight || window.innerHeight, 1);
+
+  return THREE.MathUtils.clamp(
+    viewportHeight / referenceHeight,
+    APP_CONFIG.controls.touchMinViewportFactor,
+    1
+  );
 }
 
 function clearControlMotion() {
@@ -2592,6 +2630,9 @@ function exposeDebugBridge() {
           camera.position.distanceTo(controls.target).toFixed(4)
         ),
         cameraFov: Number(camera.fov.toFixed(3)),
+        controlRotateSpeed: Number(controls.rotateSpeed.toFixed(4)),
+        controlZoomSpeed: Number(controls.zoomSpeed.toFixed(4)),
+        controlPointerType: activePointerType,
         detailStrength: earthMaterial
           ? Number(earthMaterial.uniforms.detailStrength.value.toFixed(4))
           : 0,
