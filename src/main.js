@@ -417,9 +417,12 @@ function animate() {
 
 function updateControlSensitivity() {
   const distance = camera.position.distanceTo(controls.target);
+  const rampSpan = Math.max(
+    APP_CONFIG.controls.precisionRampDistance - controls.minDistance,
+    0.0001
+  );
   const rampRatio = smooth01(
-    (distance - controls.minDistance) /
-      (APP_CONFIG.controls.precisionRampDistance - controls.minDistance)
+    (distance - controls.minDistance) / rampSpan
   );
 
   controls.rotateSpeed = THREE.MathUtils.lerp(
@@ -437,6 +440,16 @@ function updateControlSensitivity() {
     APP_CONFIG.controls.dampingFactor,
     rampRatio
   );
+
+  const targetFov = THREE.MathUtils.lerp(
+    APP_CONFIG.camera.closeFov,
+    APP_CONFIG.camera.fov,
+    rampRatio
+  );
+  if (Math.abs(camera.fov - targetFov) > 0.001) {
+    camera.fov = targetFov;
+    camera.updateProjectionMatrix();
+  }
 }
 
 function clearControlMotion() {
@@ -2578,6 +2591,7 @@ function exposeDebugBridge() {
         cameraDistance: Number(
           camera.position.distanceTo(controls.target).toFixed(4)
         ),
+        cameraFov: Number(camera.fov.toFixed(3)),
         detailStrength: earthMaterial
           ? Number(earthMaterial.uniforms.detailStrength.value.toFixed(4))
           : 0,
