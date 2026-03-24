@@ -2379,14 +2379,6 @@ function updateRegionalTexture(latitude, longitude) {
     return;
   }
 
-  if (
-    activeRegionalBounds &&
-    isCurrentViewRelevantForBounds(activeRegionalBounds)
-  ) {
-    earthMaterial.uniforms.hiResMix.value = hiResStrength;
-    return;
-  }
-
   const requestBounds = buildRegionalBounds(
     latitude,
     longitude,
@@ -2404,6 +2396,15 @@ function updateRegionalTexture(latitude, longitude) {
     return;
   }
 
+  if (
+    activeRegionalBounds &&
+    isCurrentViewRelevantForBounds(activeRegionalBounds) &&
+    isRegionalTextureDetailSufficient(activeRegionalBounds, requestBounds)
+  ) {
+    earthMaterial.uniforms.hiResMix.value = hiResStrength;
+    return;
+  }
+
   if (pendingRegionalKey === requestBounds.key) {
     return;
   }
@@ -2411,9 +2412,6 @@ function updateRegionalTexture(latitude, longitude) {
   pendingRegionalKey = requestBounds.key;
   regionalRequestId += 1;
   const requestId = regionalRequestId;
-  disposeActiveRegionalTexture();
-  earthMaterial.uniforms.hiResMix.value = 0;
-  earthMaterial.uniforms.hiResOpacity.value = 0;
 
   regionalTextureLoader.load(
     buildRegionalTextureUrl(requestBounds, regionalStyle),
@@ -2432,6 +2430,10 @@ function updateRegionalTexture(latitude, longitude) {
       texture.anisotropy = maxAnisotropy;
       texture.wrapS = THREE.ClampToEdgeWrapping;
       texture.wrapT = THREE.ClampToEdgeWrapping;
+
+      if (activeRegionalTexture) {
+        activeRegionalTexture.dispose();
+      }
 
       activeRegionalTexture = texture;
       activeRegionalBounds = requestBounds;
@@ -2589,6 +2591,18 @@ function isCurrentViewRelevantForBounds(
       bounds,
       marginRatio
     )
+  );
+}
+
+function isRegionalTextureDetailSufficient(activeBounds, requestBounds) {
+  if (!activeBounds || !requestBounds) {
+    return false;
+  }
+
+  return (
+    activeBounds.styleKey === requestBounds.styleKey &&
+    activeBounds.latRadius <= requestBounds.latRadius + 0.0001 &&
+    activeBounds.lonRadius <= requestBounds.lonRadius + 0.0001
   );
 }
 

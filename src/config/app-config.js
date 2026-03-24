@@ -89,9 +89,9 @@ export const APP_CONFIG = {
     resultLimit: 5,
   },
   regionalTexture: {
-    activationDistance: 1.28,
+    activationDistance: 1.42,
     keepMargin: 0.16,
-    requestSize: 2048,
+    requestSize: 1024,
     minRadius: 0.07,
     maxRadius: 7.4,
     maxLongitudeRadius: 5.4,
