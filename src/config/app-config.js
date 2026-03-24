@@ -16,7 +16,7 @@ export const APP_CONFIG = {
     maxDistance: 8.5,
     rotateSpeed: 0.72,
     zoomSpeed: 1.1,
-    closeRotateSpeed: 0.1,
+    closeRotateSpeed: 0.02,
     closeZoomSpeed: 0.5,
     dampingFactor: 0.07,
     closeDampingFactor: 0.12,
